@@ -39,6 +39,7 @@ import type {
   ModelFallbackPreferences,
   ResponseApiPreferences,
 } from "./tool-policy.ts";
+import { probeProxyConnectivity } from "./proxy.ts";
 import type { ProxyPreferences } from "./proxy.ts";
 import { isOpenAICodexImageModel } from "./image-model.ts";
 
@@ -1132,13 +1133,18 @@ export function registerOpenAICodexAuthRoutes(
                   return json(res, 405, { error: "method not allowed" });
                 }
                 try {
-                  return json(
-                    res,
-                    200,
-                    await proxySettings.updateProxyPreferences(
-                      proxyPreferencePatch(await readSettingsBody(req))
-                    )
+                  const patch = proxyPreferencePatch(
+                    await readSettingsBody(req)
                   );
+                  const saved =
+                    await proxySettings.updateProxyPreferences(patch);
+                  if (patch.proxyUrl === undefined) {
+                    return json(res, 200, saved);
+                  }
+                  const connectivity = await probeProxyConnectivity(
+                    saved.proxyUrl
+                  );
+                  return json(res, 200, { ...saved, connectivity });
                 } catch (error: unknown) {
                   return json(res, 400, { error: safeMessage(error) });
                 }

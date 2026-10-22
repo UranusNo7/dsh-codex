@@ -84,6 +84,71 @@ function createScopedDispatcher(proxyUrl: string): Dispatcher {
     : new EnvHttpProxyAgent();
 }
 
+/** Fixed public endpoint used only to check that a proxy can reach OpenAI. */
+export const OPENAI_CODEX_PROBE_URL =
+  "https://auth.openai.com/.well-known/openid-configuration";
+
+/** Deadline for the proxy connectivity check. */
+export const OPENAI_CODEX_PROBE_TIMEOUT_MS = 10_000;
+
+/** Safe, body-free result of a proxy connectivity check. */
+export interface ProxyConnectivity {
+  outcome: "ok" | "http-error" | "timeout" | "network-error";
+  /** HTTP status when the probe received a response; never response content. */
+  status?: number;
+  /** Wall-clock duration of the probe in milliseconds. */
+  elapsedMs: number;
+  /** True when the probe used an explicit URL instead of proxy environment. */
+  explicitProxy: boolean;
+}
+
+/**
+ * Check one proxy URL without touching saved settings, global dispatch, or
+ * credentials. An empty URL follows the existing proxy environment resolution.
+ */
+export async function probeProxyConnectivity(
+  proxyUrl: string,
+  timeoutMs: number = OPENAI_CODEX_PROBE_TIMEOUT_MS
+): Promise<ProxyConnectivity> {
+  const started = Date.now();
+  const controller = new AbortController();
+  let dispatcher: Dispatcher | undefined;
+  let explicitProxy = false;
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    explicitProxy = configuredProxyUrl(proxyUrl).length > 0;
+    dispatcher = createScopedDispatcher(proxyUrl);
+    const response = await undiciFetch(OPENAI_CODEX_PROBE_URL, {
+      method: "GET",
+      redirect: "manual",
+      signal: controller.signal,
+      dispatcher,
+    });
+    const elapsedMs = Date.now() - started;
+    await response.body?.cancel().catch(() => undefined);
+    const status = response.status;
+    return {
+      outcome: status >= 200 && status < 300 ? "ok" : "http-error",
+      status,
+      elapsedMs,
+      explicitProxy,
+    };
+  } catch {
+    return {
+      outcome: timedOut ? "timeout" : "network-error",
+      elapsedMs: Date.now() - started,
+      explicitProxy,
+    };
+  } finally {
+    clearTimeout(timer);
+    await dispatcher?.destroy().catch(() => undefined);
+  }
+}
+
 function globalProxyEnvironment(proxyUrl: string): {
   get(name: string): { value: string } | undefined;
 } {

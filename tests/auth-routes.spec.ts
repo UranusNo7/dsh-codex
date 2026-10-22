@@ -32,6 +32,7 @@ const mocked = vi.hoisted(() => ({
   logout: vi.fn(),
   status: vi.fn(),
   usage: vi.fn(),
+  probe: vi.fn(),
 }))
 
 vi.mock('../src/auth.ts', () => ({
@@ -43,6 +44,11 @@ vi.mock('../src/auth.ts', () => ({
 vi.mock('../src/usage.ts', async importOriginal => ({
   ...await importOriginal<typeof import('../src/usage.ts')>(),
   readOpenAICodexRateLimits: mocked.usage,
+}))
+
+vi.mock('../src/proxy.ts', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/proxy.ts')>(),
+  probeProxyConnectivity: mocked.probe,
 }))
 
 const store = {} as OpenAICodexCredentialStore
@@ -139,6 +145,12 @@ beforeEach(() => {
   mocked.status.mockResolvedValue({ authenticated: false })
   mocked.logout.mockResolvedValue(undefined)
   mocked.usage.mockResolvedValue({ rateLimits: [] })
+  mocked.probe.mockResolvedValue({
+    outcome: 'ok',
+    status: 200,
+    elapsedMs: 10,
+    explicitProxy: true,
+  })
 })
 
 afterEach(async () => {
@@ -175,6 +187,88 @@ describe('OpenAI Codex Web OAuth boundary', () => {
     const invalidResponse = response()
     await route.handler(request({ method: 'POST', body: JSON.stringify({ proxyMode: 'sometimes' }) }), invalidResponse)
     expect(invalidResponse.observed.status).toBe(400)
+  })
+
+  it('probes the saved URL after persisting it and keeps the save when the probe fails', async () => {
+    const order: string[] = []
+    let current = { proxyMode: 'off' as 'off' | 'scoped' | 'global', proxyUrl: '' }
+    const proxySettings = {
+      proxyPreferences: vi.fn(() => ({ ...current })),
+      updateProxyPreferences: vi.fn(async (patch: Partial<typeof current>) => {
+        order.push('save')
+        current = { ...current, ...patch }
+        return { ...current }
+      }),
+    }
+    mocked.probe.mockImplementation(async (proxyUrl: string) => {
+      order.push(`probe:${proxyUrl}`)
+      return { outcome: 'timeout', elapsedMs: 10_000, explicitProxy: true }
+    })
+    const route = captureRoutes(emptyTrustedOrigins, undefined, proxySettings)
+      .find(candidate => candidate.path === OPENAI_CODEX_PROXY_SETTINGS_PATH)
+    if (route === undefined) throw new Error('proxy settings route was not registered')
+
+    const postResponse = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ proxyUrl: 'http://127.0.0.1:7890' }),
+    }), postResponse)
+
+    expect(postResponse.observed.status).toBe(200)
+    expect(order).toEqual(['save', 'probe:http://127.0.0.1:7890'])
+    expect(JSON.parse(postResponse.observed.body ?? 'null')).toEqual({
+      proxyMode: 'off',
+      proxyUrl: 'http://127.0.0.1:7890',
+      connectivity: { outcome: 'timeout', elapsedMs: 10_000, explicitProxy: true },
+    })
+    expect(current.proxyUrl).toBe('http://127.0.0.1:7890')
+
+    const modeResponse = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ proxyMode: 'scoped' }),
+    }), modeResponse)
+    expect(mocked.probe).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(modeResponse.observed.body ?? 'null')).toEqual({
+      proxyMode: 'scoped',
+      proxyUrl: 'http://127.0.0.1:7890',
+    })
+  })
+
+  it('does not probe on invalid input or an untrusted browser origin', async () => {
+    let current = { proxyMode: 'off' as 'off' | 'scoped' | 'global', proxyUrl: '' }
+    const updateProxyPreferences = vi.fn(async (patch: Partial<typeof current>) => {
+      current = { ...current, ...patch }
+      return { ...current }
+    })
+    const proxySettings = {
+      proxyPreferences: vi.fn(() => ({ ...current })),
+      updateProxyPreferences,
+    }
+    const route = captureRoutes(emptyTrustedOrigins, undefined, proxySettings)
+      .find(candidate => candidate.path === OPENAI_CODEX_PROXY_SETTINGS_PATH)
+    if (route === undefined) throw new Error('proxy settings route was not registered')
+
+    const invalidResponse = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ proxyMode: 'sometimes' }),
+    }), invalidResponse)
+    expect(invalidResponse.observed.status).toBe(400)
+    expect(updateProxyPreferences).not.toHaveBeenCalled()
+    expect(mocked.probe).not.toHaveBeenCalled()
+
+    const untrustedResponse = response()
+    await route.handler(request({
+      method: 'POST',
+      origin: 'http://attacker.example:3081',
+      host: 'attacker.example:3081',
+      fetchSite: 'same-origin',
+      body: JSON.stringify({ proxyUrl: 'http://127.0.0.1:7890' }),
+    }), untrustedResponse)
+    expect(untrustedResponse.observed.status).toBe(403)
+    expect(updateProxyPreferences).not.toHaveBeenCalled()
+    expect(mocked.probe).not.toHaveBeenCalled()
   })
 
   it('serves and updates the model discovery subset through the plugin settings route', async () => {

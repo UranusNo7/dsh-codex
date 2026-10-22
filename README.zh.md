@@ -107,6 +107,8 @@ bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`，并选择 Code
 
 代理 URL 支持 `http://` 与 `https://`。留空时依次使用 `DSH_CODEX_PROXY`，以及标准的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与 `NO_PROXY` 环境变量。默认模式是 **跟随 dsh**，因此安装插件不会静默改变整个进程的 dispatcher。
 
+保存代理 URL 时会先保存设置，再用该 URL 在 10 秒内探测 OpenAI 的公开地址 `https://auth.openai.com/.well-known/openid-configuration`：结果分为成功、HTTP 拒绝、超时和网络错误。探测失败不会撤销已保存的 URL，也不会阻止保存；它不发送 OAuth、模型或额度请求，不改变所选代理范围，也不代表账号权限状况。
+
 ## 图片
 
 图片功能使用 dsh 的持久附件路径：

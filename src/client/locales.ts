@@ -79,8 +79,23 @@ export const en = {
   proxyUrlHint:
     "Use an HTTP(S) proxy URL. Leave blank to use DSH_CODEX_PROXY or the standard HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, and NO_PROXY environment variables.",
   proxySave: "Save proxy",
+  proxyTesting: "Saving and testing…",
   proxySaved: "Proxy settings saved.",
   proxySettingsFailed: "Proxy settings could not be saved.",
+  proxyProbeOkExplicit:
+    "Saved. OpenAI is reachable through this proxy (HTTP {status}, {elapsed} ms).",
+  proxyProbeOkEnvironment:
+    "Saved. OpenAI is reachable through the environment proxy or a direct connection (HTTP {status}, {elapsed} ms).",
+  proxyProbeHttpError:
+    "Saved, but OpenAI rejected the test request with HTTP {status}. This network path may not work for Codex.",
+  proxyProbeTimeout:
+    "Saved, but the test request timed out. The proxy or network path may be unreachable.",
+  proxyProbeNetworkError:
+    "Saved, but the test request could not connect. Check the proxy URL or environment proxy, and the network.",
+  proxyProbeEnvironment:
+    "The URL is empty, so this test used the environment proxy; without one it connected directly.",
+  proxyProbeModeOff:
+    "The scope remains Follow dsh; this test does not apply the saved proxy to subsequent requests.",
   modelCatalog: "Models shown in the selector",
   modelCatalogIntro:
     "Choose which Codex models appear in model selectors. Existing conversations can continue using a hidden model.",
@@ -220,8 +235,23 @@ export const zh: { [Key in OpenAICodexSettingsKey]: string } = {
   proxyUrlHint:
     "请输入 HTTP(S) 代理 URL；留空时读取 DSH_CODEX_PROXY，或标准的 HTTP_PROXY、HTTPS_PROXY、ALL_PROXY 与 NO_PROXY 环境变量。",
   proxySave: "保存代理",
+  proxyTesting: "正在保存并测试…",
   proxySaved: "代理设置已保存。",
   proxySettingsFailed: "无法保存代理设置。",
+  proxyProbeOkExplicit:
+    "已保存。通过此代理可访问 OpenAI（HTTP {status}，{elapsed} 毫秒）。",
+  proxyProbeOkEnvironment:
+    "已保存。通过环境代理或直连可访问 OpenAI（HTTP {status}，{elapsed} 毫秒）。",
+  proxyProbeHttpError:
+    "已保存，但 OpenAI 拒绝测试请求（HTTP {status}）。此网络路径可能无法用于 Codex。",
+  proxyProbeTimeout:
+    "已保存，但测试请求超时。代理或网络路径可能不可达。",
+  proxyProbeNetworkError:
+    "已保存，但测试请求无法连接。请检查代理 URL 或环境代理，以及网络。",
+  proxyProbeEnvironment:
+    "URL 为空，本次测试使用环境代理；未配置环境代理时为直连。",
+  proxyProbeModeOff:
+    "当前仍为“跟随 dsh”，本次测试不会把填写的代理应用到后续请求。",
   modelCatalog: "模型选择器中显示的模型",
   modelCatalogIntro:
     "选择要在模型选择器中显示的 Codex 模型；隐藏模型后，已有会话仍可继续使用。",

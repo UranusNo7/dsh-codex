@@ -15,6 +15,7 @@ import type {
 import type { OpenAICodexSettingsKey } from "./locales.ts";
 import type {
   OpenAICodexProxyMode,
+  ProxyConnectivity,
   ProxyPreferences,
 } from "../proxy.ts";
 import { OPENAI_CODEX_IMAGE_MODELS } from "../image-model.ts";
@@ -43,6 +44,11 @@ type AccountStatus =
   | { status: "signed-in"; usage: OpenAICodexUsage; quotaError?: string }
   | { status: "remote-web-origin-not-trusted" }
   | { status: "error"; message: string };
+
+/** POST /proxy adds a connectivity report only when a URL was saved. */
+type ProxySaveResponse = ProxyPreferences & {
+  connectivity?: ProxyConnectivity;
+};
 
 type LoginChallenge =
   | { method: "browser"; url: string }
@@ -739,8 +745,12 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
   const [proxy, setProxy] = useState<ProxyPreferences | undefined>();
   const [proxyDraft, setProxyDraft] = useState("");
   const [proxyBusy, setProxyBusy] = useState(false);
+  const [proxyTesting, setProxyTesting] = useState(false);
   const [proxyError, setProxyError] = useState<string | undefined>();
   const [proxySaved, setProxySaved] = useState(false);
+  const [proxyConnectivity, setProxyConnectivity] = useState<
+    ProxyConnectivity | undefined
+  >();
   const trustedOriginCommand = `dsh plugin --profile web exec dsh-codex trust-origin ${window.location.origin}`;
 
   const refresh = useCallback(async () => {
@@ -1001,17 +1011,22 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
   const updateProxy = async (
     patch: Partial<ProxyPreferences>
   ): Promise<void> => {
+    const testing = patch.proxyUrl !== undefined;
     setProxyBusy(true);
+    setProxyTesting(testing);
     setProxyError(undefined);
     setProxySaved(false);
+    setProxyConnectivity(undefined);
     try {
-      const saved = await jsonRequest<ProxyPreferences>(
+      const saved = await jsonRequest<ProxySaveResponse>(
         PROXY_PATH,
         "POST",
         patch
       );
-      setProxy(saved);
-      if (patch.proxyUrl !== undefined) setProxyDraft(saved.proxyUrl);
+      const { connectivity, ...preferences } = saved;
+      setProxy(preferences);
+      if (patch.proxyUrl !== undefined) setProxyDraft(preferences.proxyUrl);
+      setProxyConnectivity(testing ? connectivity : undefined);
       setProxySaved(true);
     } catch (error: unknown) {
       setProxyError(
@@ -1019,8 +1034,31 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
       );
     } finally {
       setProxyBusy(false);
+      setProxyTesting(false);
     }
   };
+
+  const proxyProbeMessage: string | undefined =
+    proxyConnectivity === undefined
+      ? undefined
+      : proxyConnectivity.outcome === "ok"
+        ? t(
+            proxyConnectivity.explicitProxy
+              ? "proxyProbeOkExplicit"
+              : "proxyProbeOkEnvironment",
+            {
+              status: proxyConnectivity.status,
+              elapsed: proxyConnectivity.elapsedMs,
+            }
+          )
+        : proxyConnectivity.outcome === "http-error"
+          ? t("proxyProbeHttpError", { status: proxyConnectivity.status })
+          : proxyConnectivity.outcome === "timeout"
+            ? t("proxyProbeTimeout")
+            : t("proxyProbeNetworkError");
+
+  const proxyProbeFailed =
+    proxyConnectivity !== undefined && proxyConnectivity.outcome !== "ok";
 
   const updateFastMode = async (
     patch: Partial<FastModePreferences>
@@ -1253,6 +1291,7 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
             onChange={(event) => {
               setProxyDraft(event.currentTarget.value);
               setProxySaved(false);
+              setProxyConnectivity(undefined);
             }}
           />
           <button
@@ -1262,14 +1301,34 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
             onClick={() => {
               void updateProxy({ proxyUrl: proxyDraft });
             }}>
-            {proxyBusy ? t("working") : t("proxySave")}
+            {proxyBusy
+              ? proxyTesting
+                ? t("proxyTesting")
+                : t("working")
+              : t("proxySave")}
           </button>
         </div>
         <p style={bodyStyle}>{t("proxyUrlHint")}</p>
         {proxyError === undefined ? null : (
           <p style={errorStyle}>{proxyError}</p>
         )}
-        {proxySaved ? <p style={bodyStyle}>{t("proxySaved")}</p> : null}
+        {proxySaved && proxyProbeMessage === undefined ? (
+          <p style={bodyStyle}>{t("proxySaved")}</p>
+        ) : null}
+        {proxyProbeMessage === undefined ? null : (
+          <p
+            role={proxyProbeFailed ? "alert" : "status"}
+            style={proxyProbeFailed ? errorStyle : bodyStyle}>
+            {proxyProbeMessage}
+          </p>
+        )}
+        {proxyConnectivity !== undefined &&
+        !proxyConnectivity.explicitProxy ? (
+          <p style={bodyStyle}>{t("proxyProbeEnvironment")}</p>
+        ) : null}
+        {proxyConnectivity !== undefined && proxy?.proxyMode === "off" ? (
+          <p style={bodyStyle}>{t("proxyProbeModeOff")}</p>
+        ) : null}
       </div>
       <div style={cardStyle}>
         <div>

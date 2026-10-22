@@ -107,6 +107,8 @@ Open **Settings → OpenAI Codex → Network proxy** to select one of three scop
 
 The URL accepts `http://` and `https://` proxies. Leave it blank to use `DSH_CODEX_PROXY`, then the standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables. The default mode is **Follow dsh**, so installing the plugin never silently changes the process dispatcher.
 
+Saving a proxy URL keeps the setting first, then checks connectivity from that URL with a 10-second deadline against OpenAI's public `https://auth.openai.com/.well-known/openid-configuration` endpoint. The check reports success, an HTTP rejection, a timeout, or a network error; a failed check keeps the saved URL and never blocks the save. It sends no OAuth, model, or quota traffic, does not change the selected scope, and says nothing about account permissions.
+
 ## Images
 
 Image support uses dsh's durable attachment path:

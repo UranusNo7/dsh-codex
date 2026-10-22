@@ -52,6 +52,12 @@ describe("OpenAI Codex settings model catalog", () => {
     let automaticModelFallback = false;
     let authStatus = "signed-out";
     let proxy = { proxyMode: "off", proxyUrl: "" };
+    let nextProbe = async (): Promise<Record<string, unknown>> => ({
+      outcome: "ok",
+      status: 200,
+      elapsedMs: 12,
+      explicitProxy: true,
+    });
     const fetchMock = vi.fn(
       async (
         input: string | URL | Request,
@@ -107,10 +113,11 @@ describe("OpenAI Codex settings model catalog", () => {
         }
         if (path.endsWith("/proxy")) {
           if (init?.method === "POST") {
-            proxy = {
-              ...proxy,
-              ...(JSON.parse(String(init.body)) as Partial<typeof proxy>),
-            };
+            const patch = JSON.parse(String(init.body)) as Partial<typeof proxy>;
+            proxy = { ...proxy, ...patch };
+            if (patch.proxyUrl === undefined) return json(proxy);
+            const connectivity = await nextProbe();
+            return json({ ...proxy, connectivity });
           }
           return json(proxy);
         }
@@ -237,6 +244,89 @@ describe("OpenAI Codex settings model catalog", () => {
     expect(JSON.parse(String(proxyPosts[1]?.[1]?.body))).toEqual({
       proxyUrl: "http://127.0.0.1:7890",
     });
+
+    const proxySaveButton = screen.getByRole<HTMLButtonElement>("button", {
+      name: en.proxySave,
+    });
+    let releaseProbe!: (value: Record<string, unknown>) => void;
+    nextProbe = () =>
+      new Promise((resolve) => {
+        releaseProbe = resolve;
+      });
+    fireEvent.change(proxyUrl, {
+      target: { value: "http://127.0.0.1:7891" },
+    });
+    fireEvent.click(proxySaveButton);
+    await waitFor(() => {
+      expect(proxySaveButton.textContent).toBe(en.proxyTesting);
+    });
+    expect(proxySaveButton.disabled).toBe(true);
+    expect(proxyUrl.disabled).toBe(true);
+    releaseProbe({ outcome: "ok", status: 200, elapsedMs: 9, explicitProxy: true });
+    await waitFor(() => {
+      expect(proxySaveButton.disabled).toBe(false);
+      expect(proxySaveButton.textContent).toBe(en.proxySave);
+    });
+    const successMessage = await screen.findByText(/\(HTTP 200, 9 ms\)/u);
+    expect(successMessage.getAttribute("role")).toBe("status");
+
+    fireEvent.change(proxyUrl, {
+      target: { value: "http://127.0.0.1:7892" },
+    });
+    expect(screen.queryByText(/\(HTTP 200, 9 ms\)/u)).toBeNull();
+
+    nextProbe = async () => ({
+      outcome: "http-error",
+      status: 403,
+      elapsedMs: 20,
+      explicitProxy: true,
+    });
+    fireEvent.click(proxySaveButton);
+    const httpAlert = await screen.findByRole("alert");
+    expect(httpAlert.textContent).toContain("HTTP 403");
+
+    nextProbe = async () => ({
+      outcome: "timeout",
+      elapsedMs: 10_000,
+      explicitProxy: true,
+    });
+    fireEvent.click(proxySaveButton);
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain("timed out");
+    });
+
+    nextProbe = async () => ({
+      outcome: "network-error",
+      elapsedMs: 5,
+      explicitProxy: true,
+    });
+    fireEvent.click(proxySaveButton);
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toContain(
+        "could not connect"
+      );
+    });
+
+    fireEvent.click(screen.getByRole("radio", { name: en.proxyModeOff }));
+    await waitFor(() => {
+      expect(proxy.proxyMode).toBe("off");
+    });
+    expect(await screen.findByText(en.proxySaved)).toBeDefined();
+
+    nextProbe = async () => ({
+      outcome: "ok",
+      status: 200,
+      elapsedMs: 5,
+      explicitProxy: false,
+    });
+    fireEvent.change(proxyUrl, { target: { value: "" } });
+    fireEvent.click(proxySaveButton);
+    const environmentMessage = await screen.findByText(
+      /environment proxy or a direct connection/u
+    );
+    expect(environmentMessage.getAttribute("role")).toBe("status");
+    expect(screen.getByText(en.proxyProbeEnvironment)).toBeDefined();
+    expect(screen.getByText(en.proxyProbeModeOff)).toBeDefined();
 
     const fastModeToggle = await screen.findByRole<HTMLButtonElement>(
       "switch",
