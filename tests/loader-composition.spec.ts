@@ -63,6 +63,9 @@ describe('OpenAI Codex real composition', () => {
     await ctx.loader.await()
 
     expect(ctx.llm.listProviders()).toEqual([{ id: 'openai-codex', name: 'OpenAI Codex' }])
+    // Optional tool compatibility must not block a composition without tools/sandboxPolicy.
+    expect(ctx.get('tools')).toBeUndefined()
+    expect(ctx.get('sandboxPolicy')).toBeUndefined()
     const models = await ctx.llm.listModels('openai-codex')
     expect(models.map(model => model.id)).toEqual(['gpt-5.6-terra', 'gpt-5.6-luna'])
     await expect(ctx.llm.resolveModelInfo('openai-codex', 'gpt-5.6-luna')).resolves.toMatchObject({

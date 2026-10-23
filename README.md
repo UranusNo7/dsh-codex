@@ -22,16 +22,29 @@ Use a ChatGPT subscription in [DeepSeek Harness](https://github.com/deepseek-ai/
 
 ChatGPT subscription authentication and usage-based OpenAI API access are different products. This plugin uses the ChatGPT Codex backend only; it does not turn a subscription into a general-purpose OpenAI API credential.
 
+## Standalone bundle
+
+Version `0.3.3-standalone.1` is the self-contained fork build, intended to be the only Codex plugin in a base dsh profile. It is distributed as the `v0.3.3-standalone.1` GitHub prerelease asset; it is not published to npm.
+
+- **Codex-only redundancy cleanup.** A GPT model that habitually sends `sandbox_permissions` and `justification` on ordinary writes no longer fails those calls. The bundle strips those two arguments only when the current sandbox mode is known and the requested mode is not strictly wider than it (`requested <= current`), and only when the routed provider is exactly `openai-codex`, the tool is one of `bash`, `pwsh`, `write`, or `edit`, and that tool's schema declares dsh's native escalation contract. A request that genuinely widens the sandbox keeps both arguments and still enters dsh's own approval flow. On the Codex path this replaces the separate `dsh-gpt-compat` plugin; it does not change or replace compatibility handling for any other API provider.
+- **No header spoofing.** The bundle does not globally rewrite `User-Agent` or `Originator`, and it does not uniformly impersonate `codex_cli_rs`; each provider and protocol path keeps the request headers it requires. The separate `dsh-custom-header` plugin is neither required nor bundled.
+- **Requirements.** Development baseline is the dsh `0.2.0-rc.1` plugin surfaces in this checkout; the target is the `0.2.1-rc.2` desktop runtime, whose packaged tarball passed an isolated consumer smoke test against exact `0.2.1-rc.2` core packages and Cordis `4.0.5`. Other dsh versions are not promised, and installing into `0.2.1-rc.2` reports expected peer-range warnings. It needs the normal tools, sandbox-policy, LLM, web, settings, filesystem, and attachment services, plus a ChatGPT plan eligible for Codex. Installing performs no login by itself, keeps credentials in its own store, and never reads or copies `~/.codex/auth.json`.
+- **Not included.** ChatGPT-web-only capabilities: it does not automate the web UI, read ChatGPT conversations or memories, or turn the subscription into a general-purpose OpenAI API credential.
+
+The cleanup and its plugin lifecycle are exercised by [the standalone acceptance test](tests/standalone.spec.ts).
+
 ## Install
 
-Install the prebuilt bundle from npm into the selected dsh profile:
+Install the prebuilt GitHub release tarball into the selected dsh profile:
 
 ```sh
-dsh plugin --profile web add dsh-codex
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
 dsh web
 ```
 
-From a DeepSeek Harness source checkout, use `pnpm dsh plugin --profile web add dsh-codex`. A local plugin checkout can still be installed with `link:/absolute/path/to/dsh-codex` for development.
+The standalone tarball is distributed as the `v0.3.3-standalone.1` GitHub prerelease asset and is not published to npm. Download that release asset, not the GitHub-generated source archive. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; `dsh plugin --profile web add dsh-codex` installs that upstream bundle instead. For the desktop app, use the same asset with `--profile desktop`.
+
+From a DeepSeek Harness source checkout, use `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"`. A plugin checkout can still be installed with `link:/absolute/path/to/dsh-codex` for development.
 
 Open **Settings → OpenAI Codex** and choose **Browser sign-in** or **Device code**. Browser sign-in shows an authorization link; click it to open the system browser, which returns to the dsh host's localhost callback when both run on the same machine. Device code works when the browser is on another machine. The account page shows live Codex quota bars and exact remaining percentages; exact credit balances or workspace limits appear only when the account API supplies them.
 
@@ -47,10 +60,10 @@ dsh plugin --profile web exec dsh-codex doctor --json
 dsh plugin --profile web exec dsh-codex logout
 ```
 
-For `dsh-tui`, install the bundle into the same profile:
+For `dsh-tui`, install the same tarball into that profile:
 
 ```sh
-dsh plugin --profile dsh-tui add dsh-codex
+dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
 ```
 
 After restarting the TUI, `/model` lists the `openai-codex` catalog. With no explicit route or saved selection, the TUI adopts the bundle's `gpt-5.6-sol` default. Use `/codex status|login|logout|usage|config` for the account and live settings; `/codex set backend-fallback on|off` controls automatic model recovery, while the remaining switches are listed by `/codex set`. `/codex login` shows a browser URL, and `/codex login device` shows a device code for remote terminals. The TUI's `/settings` also exposes Codex's scalar controls through the same dsh settings namespace. Model visibility and the proxy URL remain editable in Web Settings. Both front doors share credentials and live preferences.
@@ -184,6 +197,7 @@ Explicit shared files use in-process serialization, with no `.lock` or refresh-i
 - ChatGPT plan eligibility, model access, quotas, and backend behavior are controlled by OpenAI and may change.
 - The Codex endpoint does not enforce the ordinary Responses `max_output_tokens` field. Compaction works, but its configured summary cap cannot be imposed server-side on this route.
 - Filesystem, shell, skills, MCP, subagents, permissions, attachments, compaction, and the `web_search` tool itself still come from the active dsh profile.
+- The standalone build is developed against the dsh `0.2.0-rc.1` surfaces in this checkout and targets the `0.2.1-rc.2` desktop runtime. [docs/standalone.md](docs/standalone.md) records which contracts were verified for each, and the boundary: repository tests simulate OpenAI traffic and never sign in with a real account.
 - The standalone search endpoint is not a public OpenAI Platform API. Compatibility follows the pinned Codex/pi-ai implementation.
 
 See [the design document](docs/design.md) for protocol, persistence, and lifecycle details.

@@ -22,16 +22,29 @@
 
 ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只使用 ChatGPT Codex 后端，不会把订阅转换成通用 OpenAI API 凭据。
 
+## 一体化版本
+
+`0.3.3-standalone.1` 是自包含的 fork 构建，定位为**基础 dsh profile 中唯一的 Codex 插件**。它以 `v0.3.3-standalone.1` 的 GitHub 预发布资源分发；未发布到 npm。
+
+- **仅 Codex 的冗余提权清理。** GPT 模型在普通写操作中习惯性附带 `sandbox_permissions` 与 `justification` 时，工具调用不再因此失败。只有同时满足以下条件才会移除这两个参数：已能确定当前沙箱模式、且请求目标不严格宽于当前模式（`requested <= current`）、当前请求 provider 严格为 `openai-codex`、工具属于 `bash`／`pwsh`／`write`／`edit`、且该工具的 schema 声明了 dsh 原生提权契约。真正扩大沙箱权限的请求会完整保留参数，继续进入 dsh 自己的审批流程。在 Codex 路径上该能力取代独立的 `dsh-gpt-compat` 插件；它不改变也不替代其他 API provider 的兼容处理。
+- **不做请求头伪装。** 本插件不会全局改写 `User-Agent`／`Originator`，也不会统一冒充 `codex_cli_rs`；各 provider 与协议路径保留自身需要的请求头。独立的 `dsh-custom-header` 插件既不需要，也没有被打包。
+- **运行要求。** 开发基线是本 checkout 的 dsh `0.2.0-rc.1` 插件表层；目标是桌面端 `0.2.1-rc.2`，其安装包已在只使用精确 `0.2.1-rc.2` 核心包与 Cordis `4.0.5` 的隔离消费者中通过烟测。其他 dsh 版本不作承诺；安装到 `0.2.1-rc.2` 时会出现预期内的 peer 版本范围警告。需要常规 tools、sandbox-policy、LLM、web、settings、文件系统与附件服务，以及具备 Codex 资格的 ChatGPT 套餐。安装本身不会发起登录，凭据保存在插件自己的存储中，绝不读取或复制 `~/.codex/auth.json`。
+- **不包含。** ChatGPT 网页版专属能力：不自动化网页界面、不读取 ChatGPT 会话或记忆，也不会把订阅转换成通用的 OpenAI API 凭据。
+
+清理行为及其插件生命周期由[一体化验收测试](tests/standalone.spec.ts)覆盖。
+
 ## 安装
 
-从 npm 把预构建 bundle 安装到选定的 dsh profile：
+把 GitHub Release 中预构建的一体化安装包安装到选定的 dsh profile：
 
 ```sh
-dsh plugin --profile web add dsh-codex
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
 dsh web
 ```
 
-从 DeepSeek Harness 源码 checkout 运行时，使用 `pnpm dsh plugin --profile web add dsh-codex`。开发插件时仍可用 `link:/absolute/path/to/dsh-codex` 安装本地 checkout。
+该安装包以 `v0.3.3-standalone.1` 的 GitHub 预发布资源分发，未发布到 npm。请下载 Release 资源，不要安装 GitHub 自动生成的源码压缩包。npm registry 上的 `dsh-codex` 仍是上游版本，不包含这些一体化改动；`dsh plugin --profile web add dsh-codex` 安装的是那个上游 bundle。桌面端应用请改用同一资源并传 `--profile desktop`。
+
+从 DeepSeek Harness 源码 checkout 运行时，使用 `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"`。开发插件时仍可用 `link:/absolute/path/to/dsh-codex` 安装本地 checkout。
 
 打开 **设置 → OpenAI Codex**，选择 **浏览器登录** 或 **设备码登录**。浏览器登录会给出授权链接；点击后在系统浏览器完成授权。当浏览器和 dsh 宿主位于同一台机器时，localhost 回调会完成登录；远端浏览器可以使用设备码。账号页面会显示实时 Codex 额度进度条与精确剩余百分比；只有账号接口提供信用余额或工作区限额时，才会一并显示精确数值。
 
@@ -50,7 +63,7 @@ dsh plugin --profile web exec dsh-codex logout
 在 `dsh-tui` 中使用时，把 bundle 安装到同一个 profile：
 
 ```sh
-dsh plugin --profile dsh-tui add dsh-codex
+dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
 ```
 
 重新启动 TUI 后，`/model` 会列出 `openai-codex` 的模型；没有显式模型配置或已保存选择时，TUI 会采用 bundle 注册的 `gpt-5.6-sol`。`/codex status|login|logout|usage|config` 用于管理账号与查看配置；`/codex set backend-fallback on|off` 控制自动模型恢复，其余开关可通过 `/codex set` 查看。`/codex login` 会给出浏览器链接，远端终端可用 `/codex login device` 获取设备码。TUI 的 `/settings` 也通过同一个 dsh 设置命名空间编辑 Codex 的标量设置；模型可见性与代理 URL 仍在 Web 设置页编辑。两个界面共用凭据和实时偏好。
@@ -184,6 +197,7 @@ dsh 登录默认与 Codex CLI／Desktop 相互独立：
 - ChatGPT 套餐资格、模型权限、配额及后端行为由 OpenAI 控制，可能发生变化。
 - Codex 端点不执行普通 Responses 的 `max_output_tokens` 字段。压缩可以工作，但该路由无法在服务端落实配置的摘要上限。
 - 文件系统、shell、skills、MCP、subagents、权限、附件、压缩和 `web_search` 工具本身仍来自当前 dsh profile。
+- 一体化版本面向本 checkout 的 dsh `0.2.0-rc.1` 表层开发，目标运行时为桌面端 `0.2.1-rc.2`。各自的验证契约与边界记录在 [docs/standalone.md](docs/standalone.md)：仓库测试模拟 OpenAI 流量，不会使用真实账号登录。
 - 独立搜索端点不是公开的 OpenAI Platform API；兼容性取决于固定版本的 Codex／pi-ai 实现。
 
 协议、持久化与生命周期细节见[设计文档](docs/design.zh.md)。

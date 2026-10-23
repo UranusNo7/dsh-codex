@@ -27,6 +27,7 @@ import { imagegenTool } from "./imagegen.ts";
 import { ImageToolPolicy } from "./tool-policy.ts";
 import { FastModeRegistry } from "./fast-mode.ts";
 import { installOpenAICodexModelFallback } from "./model-fallback.ts";
+import { installOpenAICodexToolCompat } from "./tool-compat.ts";
 import { assertNoOpenAICodexProviderConflict } from "./doctor.ts";
 import {
   installOpenAICodexSearchEvent,
@@ -363,5 +364,8 @@ export function apply(ctx: Context, config: Config): void {
   });
   ctx.inject(["tools", "fs", "attachments", "agents"], (toolCtx) => {
     installReadImageEnhancement(toolCtx, imageTools);
+  });
+  ctx.inject(["tools", "sandboxPolicy"], (toolCtx) => {
+    installOpenAICodexToolCompat(toolCtx);
   });
 }

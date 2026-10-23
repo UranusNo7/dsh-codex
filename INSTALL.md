@@ -8,7 +8,7 @@ Install the public `dsh-codex` bundle into the requested DeepSeek Harness profil
 
 ## Defaults
 
-- **Package:** install `dsh-codex` from the configured npm registry. Use a local checkout only when the user explicitly supplies one for development.
+- **Package:** for the standalone build, install the GitHub prerelease asset `dsh-codex-0.3.3-standalone.1.tgz` from `https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz`. It is not published to npm. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; use it only when the user explicitly wants the upstream registry bundle.
 - **Profile:** use the user-named profile; otherwise use `web`.
 - **Launcher:** prefer an installed `dsh`. From a DeepSeek Harness source checkout, run commands in that checkout and replace `dsh` with `pnpm dsh`.
 - **Search mode:** use `live` unless the user requests `cached` or `indexed`.
@@ -31,16 +31,24 @@ Run `dsh --version` or `dsh --help`. From a source checkout, run `pnpm dsh --ver
 
 ### 2. Install the bundle
 
-For the default Web profile:
+For the standalone build, install the published prerelease tarball. It already contains the built `lib/` entries, the bundle patch, and the third-party notices, so no build step is required:
+
+```sh
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
+```
+
+The asset above is the supported standalone distribution; it is not on npm. Do not install the GitHub-generated source archive. Do not additionally install `dsh-custom-header` or `dsh-gpt-compat`: this build already contains the Codex-only redundancy cleanup and intentionally does not rewrite request headers.
+
+The npm registry package `dsh-codex` remains the upstream release without these changes; it is a separate path and installs only when requested:
 
 ```sh
 dsh plugin --profile web add dsh-codex
 ```
 
-From a Harness source checkout:
+From a Harness source checkout with the standalone tarball:
 
 ```sh
-pnpm dsh plugin --profile web add dsh-codex
+pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
 ```
 
 If the user explicitly supplied a local checkout, first require `package.json`, `cordis.patch.yml`, `lib/index.js`, `lib/client.js`, and `lib/bin.js`, and require `package.json.name` to equal `dsh-codex`. Then install its normalized absolute path, using forward slashes on Windows:
