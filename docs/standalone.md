@@ -1,10 +1,10 @@
 # 一体化构建（standalone）：能力、验收与边界
 
-本文件说明 `0.3.3-standalone.2` 的定位、随包能力、已验证范围和尚未验证的部分。目标是**基础 dsh + 本插件**即可使用 Codex 订阅能力，不再安装 `dsh-custom-header` 或 `dsh-gpt-compat`。
+本文件说明 `0.3.3-standalone.3` 的定位、随包能力、已验证范围和尚未验证的部分。目标是**基础 dsh + 本插件**即可使用 Codex 订阅能力，不再安装 `dsh-custom-header` 或 `dsh-gpt-compat`。
 
 ## 定位
 
-- 目标 profile 只包含基础 DeepSeek Harness 组成与本 bundle。以 **GitHub 预发布**（tag `v0.3.3-standalone.2`）分发；未发布到 npm。
+- 目标 profile 只包含基础 DeepSeek Harness 组成与本 bundle。以 **GitHub 预发布**（tag `v0.3.3-standalone.3`）分发；未发布到 npm。
 - 需要具备 Codex 资格的 ChatGPT 套餐；套餐资格、模型权限、配额和后端行为由 OpenAI 控制。
 - 不会全局重写、也不会统一冒充 `codex_cli_rs` 请求头；各 provider 与协议路径保留自身需要的请求头。不自动化 ChatGPT 网页界面，也不读取 ChatGPT 会话或记忆。
 - 在 Codex 路径上替代 `dsh-gpt-compat` 的兼容处理，但不影响、也不替代其他 API provider 的兼容逻辑。
@@ -19,6 +19,7 @@
 | 设置页与账号页接口 | `src/auth-routes.ts`、`src/client/` |
 | `read_image` 的 HTTP(S) 输入与 `imagegen` | `src/read-image-enhancement.ts`、`src/imagegen.ts`、`src/public-http.ts` |
 | 三态网络代理与保存时连通性测试 | `src/proxy.ts`、`src/auth-routes.ts` |
+| 内置出网代理节点管理（mihomo 内核 + geodata、订阅/测速/自动选节点、Codex-only/全局） | `src/net-proxy/index.js`、`bin/net-proxy/`、`cordis.patch.yml` |
 | **仅 Codex 的冗余提权清理** | `src/tool-compat.ts`，由 `src/index.ts` 通过 `ctx.inject(['tools', 'sandboxPolicy'])` 挂载 |
 | bundle 组成补丁 | `cordis.patch.yml` |
 
@@ -37,6 +38,15 @@
 - 不修改沙箱策略、调用标识或信号；插件 fiber 释放后监听器随之解绑。
 
 **刻意不包含**：`dsh-custom-header` 的全局请求头改写。本插件不会全局重写 `User-Agent`，也不会统一冒充 `codex_cli_rs`；各 provider 与协议路径保留自身既有的 originator（pi-ai 协议默认 `pi`，独立搜索与生图为 `deepseek-harness`，原生压缩为 `dsh-codex`）。另外，“仅 Codex”代理模式直接经 `undici` 发送，不会经过全局 `fetch` 中间件。
+
+## 内置出网代理
+
+- 随包内置 `dsh-net-proxy` 的节点管理：mihomo 内核与 geodata 位于 `bin/net-proxy/`，无需另装代理客户端。
+- 插件设置页负责订阅导入、节点测速、固定节点或自动选择最快节点，以及代理启停。
+- 代理范围默认 **仅 Codex**，只影响 Codex 流量；可切换为 **整个 dsh**。
+- 内置内核仅支持 **Windows x64**；插件自身代码与平台无关。
+- **不要与独立的 `dsh-net-proxy` 插件同时启用**：两者会各自启动内核，并争用同一份本地状态与端口。
+- 内置内核与 geodata 的许可、来源与实际字节 SHA-256 见 [third-party-notices.md](./third-party-notices.md)。
 
 ## 验收矩阵
 
@@ -68,8 +78,10 @@
 - 开发基线：本 checkout 的 dsh `0.2.0-rc.1` 表层，实际验证 `tools/pre-execute` waterfall、`ctx.tools.get`、`session.requestHeader()` 与 `ctx.sandboxPolicy.resolve()`。
 - 目标运行时：桌面端 dsh `0.2.1-rc.2`。消费者烟测使用精确 `0.2.1-rc.2` 核心包与 Cordis `4.0.5`，从打包后的 `.tgz` 安装并加载本插件，23 项检查全部通过；其他 dsh 版本不作承诺。
 - `package.json` 的 peerDependencies 仍声明 `^0.2.0-rc.1` 系列，安装到 `0.2.1-rc.2` 时 `pnpm` 会报告 peer 范围冲突（例如 `@deepseek-ai/dsh-fs` 与 `@deepseek-ai/dsh-subagent` 的版本要求），安装本身成功且烟测通过；这不代表接口不兼容，也不构成全面升级依赖的理由。
-- 当前发布版本：`0.3.3-standalone.2`（GitHub 预发布，未发布 npm）。相对 `0.3.3-standalone.1`，本轮仅新增内置
-  `gpt-6.1-terra` 目录及对应测试/文档同步；协议、默认模型与既有能力不变。
+- 当前发布版本：`0.3.3-standalone.3`（GitHub 预发布，未发布 npm）。相对 `0.3.3-standalone.2`，
+  本轮新增内置 mihomo 出网代理（含 `bin/net-proxy/` 内核与 geodata）、Codex-only/整个 DSH 两种 scope、
+  代理测速与 controller 直连修复及对应测试/文档同步；`.2` 相对 `.1` 新增内置 `gpt-6.1-terra` 目录。
+  协议、默认模型与既有能力不变。
 
 ## 真实桌面基础 QA（历史记录：`0.3.3-standalone.1`，本会话）
 
@@ -99,9 +111,9 @@
 从 GitHub 预发布资源安装（桌面端用 `--profile desktop`，Web 用 `--profile web`）：
 
 ```sh
-dsh plugin --profile desktop add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
+dsh plugin --profile desktop add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
 ```
 
-该安装包以 `v0.3.3-standalone.2` GitHub 预发布资源分发，未发布到 npm。安装后重启桌面端
+该安装包以 `v0.3.3-standalone.3` GitHub 预发布资源分发，未发布到 npm。安装后重启桌面端
 dsh，再在 **设置 → OpenAI Codex** 完成账号登录。不要安装 GitHub 自动生成的源码压缩包，也
 不要再安装 `dsh-custom-header` 或 `dsh-gpt-compat`。

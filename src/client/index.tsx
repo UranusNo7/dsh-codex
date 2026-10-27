@@ -15,6 +15,8 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-slots'
 import { OpenAICodexSettings } from './OpenAICodexSettings.tsx'
 import type { OpenAICodexSettingsInjected } from './OpenAICodexSettings.tsx'
+import { NetworkProxySettings } from './NetworkProxySettings.tsx'
+import type { NetworkProxySettingsInjected } from './NetworkProxySettings.tsx'
 import { ImagegenToolView } from './ImagegenToolView.tsx'
 import type { ImageLoader } from './ImagegenToolView.tsx'
 import { OpenAICodexFastModeToggle } from './OpenAICodexFastModeToggle.tsx'
@@ -74,6 +76,13 @@ export function apply(ctx: ClientContext): void {
     label: () => t('nav'),
     inject: (): OpenAICodexSettingsInjected => ({ t }),
   }, OpenAICodexSettings))
+  ctx.slots.inject('settings.section', () => ctx.slots.register({
+    name: 'settings.section',
+    id: 'network-proxy',
+    order: 16,
+    label: () => t('networkProxyNav'),
+    inject: (): NetworkProxySettingsInjected => ({ t }),
+  }, NetworkProxySettings))
   ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
     name: 'tool.call.toolview',
     key: 'imagegen',

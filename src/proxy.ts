@@ -171,6 +171,19 @@ function globalProxyEnvironment(proxyUrl: string): {
 type ProxyEnvironment = ReturnType<typeof globalProxyEnvironment>;
 type ProxyDisposer = () => Promise<void>;
 
+/**
+ * Integration points supplied by the bundled network proxy (mihomo) host.
+ *
+ * Both are read per request, so enabling/disabling the proxy, switching scope,
+ * or a kernel restart (new mixed port) needs no re-wiring of the transport.
+ */
+export interface ProxyTransportHooks {
+  /** Mixed-port URL the built-in proxy serves for Codex traffic, when it owns it. */
+  managedProxyUrl?: () => string | undefined;
+  /** True while the built-in proxy owns the process-wide dispatcher. */
+  netProxyOwnsGlobal?: () => boolean;
+}
+
 async function installHarnessGlobalProxy(
   proxyUrl: string
 ): Promise<ProxyDisposer> {
@@ -185,26 +198,43 @@ async function installHarnessGlobalProxy(
 /**
  * Owns request-scoped dispatch and an optional nested Harness-wide policy.
  * Disposing the nested policy restores the launcher's original proxy policy.
+ *
+ * The bundled network proxy (mihomo) integrates through the two hooks below:
+ * when it runs in "codex" scope it never touches process-global state, and this
+ * transport is the only place its mixed-port URL is used. When it runs in
+ * "global" scope it already owns the process dispatcher, so this transport must
+ * not stack a second global takeover on top.
  */
 export class OpenAICodexProxyTransport {
   private readonly dispatchers = new Map<string, Dispatcher>();
   private globalDispose: (() => Promise<void>) | undefined;
   private appliedGlobalKey: string | undefined;
+  private managedUrl: string | undefined;
   private transition: Promise<void> = Promise.resolve();
   private disposed = false;
 
-  constructor(private readonly preferences: () => ProxyPreferences) {}
+  constructor(
+    private readonly preferences: () => ProxyPreferences,
+    private readonly hooks: ProxyTransportHooks = {}
+  ) {}
 
   /** Reconcile process-global state after a live setting change. */
   apply(): Promise<void> {
     const preferences = this.preferences();
     normalizeProxyUrl(preferences.proxyUrl);
+    const netProxyOwnsGlobal = this.hooks.netProxyOwnsGlobal?.() === true;
     const desiredKey =
-      preferences.proxyMode === "global"
+      preferences.proxyMode === "global" && !netProxyOwnsGlobal
         ? proxyKey(preferences.proxyUrl)
         : undefined;
     this.transition = this.transition.catch(() => undefined).then(async () => {
       if (this.disposed || desiredKey === this.appliedGlobalKey) return;
+      // While the built-in network proxy owns the process dispatcher, disposing
+      // our nested dsh-http-proxy policy would restore an older dispatcher on
+      // top of that owner. Keep the disposer and the applied key; the next
+      // apply() after the built-in proxy releases the slot reconciles normally
+      // (re-installing the manual policy, or restoring the original one).
+      if (this.hooks.netProxyOwnsGlobal?.() === true) return;
       await this.restoreGlobal();
       if (desiredKey === undefined) return;
       this.globalDispose = await installHarnessGlobalProxy(
@@ -219,17 +249,35 @@ export class OpenAICodexProxyTransport {
   readonly fetch: typeof globalThis.fetch = async (input, init) => {
     await this.apply();
     const preferences = this.preferences();
-    if (preferences.proxyMode !== "scoped") {
-      return await globalThis.fetch(input, init);
+    if (preferences.proxyMode === "scoped") {
+      const options = {
+        ...(init ?? {}),
+        dispatcher: this.dispatcher(preferences.proxyUrl),
+      } as Parameters<typeof undiciFetch>[1];
+      return (await undiciFetch(
+        input as Parameters<typeof undiciFetch>[0],
+        options
+      )) as unknown as Response;
     }
-    const options = {
-      ...(init ?? {}),
-      dispatcher: this.dispatcher(preferences.proxyUrl),
-    } as Parameters<typeof undiciFetch>[1];
-    return (await undiciFetch(
-      input as Parameters<typeof undiciFetch>[0],
-      options
-    )) as unknown as Response;
+    // An explicitly configured proxy always wins. With the default "off" mode,
+    // a running built-in network proxy covers Codex traffic through its mixed
+    // port; "global" scope leaves both host and Codex traffic to its own
+    // process-wide dispatcher, which plain fetch already inherits.
+    const managed =
+      preferences.proxyMode === "off"
+        ? this.hooks.managedProxyUrl?.()
+        : undefined;
+    if (managed !== undefined && managed !== "") {
+      const options = {
+        ...(init ?? {}),
+        dispatcher: this.managedDispatcher(managed),
+      } as Parameters<typeof undiciFetch>[1];
+      return (await undiciFetch(
+        input as Parameters<typeof undiciFetch>[0],
+        options
+      )) as unknown as Response;
+    }
+    return await globalThis.fetch(input, init);
   };
 
   /** Restore host networking and close all provider-owned pools. */
@@ -249,6 +297,23 @@ export class OpenAICodexProxyTransport {
     let dispatcher = this.dispatchers.get(key);
     if (dispatcher === undefined) {
       dispatcher = createScopedDispatcher(proxyUrl);
+      this.dispatchers.set(key, dispatcher);
+    }
+    return dispatcher;
+  }
+
+  private managedDispatcher(proxyUrl: string): Dispatcher {
+    if (this.managedUrl !== undefined && this.managedUrl !== proxyUrl) {
+      const previousKey = `managed:${this.managedUrl}`;
+      const previous = this.dispatchers.get(previousKey);
+      this.dispatchers.delete(previousKey);
+      void previous?.close().catch(() => undefined);
+    }
+    this.managedUrl = proxyUrl;
+    const key = `managed:${proxyUrl}`;
+    let dispatcher = this.dispatchers.get(key);
+    if (dispatcher === undefined) {
+      dispatcher = new ProxyAgent(proxyUrl);
       this.dispatchers.set(key, dispatcher);
     }
     return dispatcher;

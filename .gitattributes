@@ -1,0 +1,6 @@
+# Bundled mihomo core and geodata are binary: never text-normalize, diff, or merge them.
+# Marking them explicitly also keeps `git diff --check` from reading their bytes as
+# lines with trailing whitespace.
+bin/net-proxy/*.exe binary
+bin/net-proxy/geosite.dat binary
+bin/net-proxy/geoip.metadb binary

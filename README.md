@@ -19,12 +19,13 @@ Use a ChatGPT subscription in [DeepSeek Harness](https://github.com/deepseek-ai/
 - a per-conversation Fast Mode switch and compact weekly quota indicator in the Web composer
 - optional backend-authorized model recovery, including hidden Luna Reserve routing
 - a three-scope HTTP(S) proxy control for Codex-only or process-wide routing
+- built-in outbound-proxy node management with a bundled mihomo core: subscription import, latency test, automatic or pinned node selection, Codex-only by default or whole dsh, Windows x64
 
 ChatGPT subscription authentication and usage-based OpenAI API access are different products. This plugin uses the ChatGPT Codex backend only; it does not turn a subscription into a general-purpose OpenAI API credential.
 
 ## Standalone bundle
 
-Version `0.3.3-standalone.2` is the self-contained fork build, intended to be the only Codex plugin in a base dsh profile. It is distributed as the `v0.3.3-standalone.2` GitHub prerelease asset; it is not published to npm.
+Version `0.3.3-standalone.3` is the self-contained fork build, intended to be the only Codex plugin in a base dsh profile. It is distributed as the `v0.3.3-standalone.3` GitHub prerelease asset; it is not published to npm.
 
 - **Codex-only redundancy cleanup.** A GPT model that habitually sends `sandbox_permissions` and `justification` on ordinary writes no longer fails those calls. The bundle strips those two arguments only when the current sandbox mode is known and the requested mode is not strictly wider than it (`requested <= current`), and only when the routed provider is exactly `openai-codex`, the tool is one of `bash`, `pwsh`, `write`, or `edit`, and that tool's schema declares dsh's native escalation contract. A request that genuinely widens the sandbox keeps both arguments and still enters dsh's own approval flow. On the Codex path this replaces the separate `dsh-gpt-compat` plugin; it does not change or replace compatibility handling for any other API provider.
 - **No header spoofing.** The bundle does not globally rewrite `User-Agent` or `Originator`, and it does not uniformly impersonate `codex_cli_rs`; each provider and protocol path keeps the request headers it requires. The separate `dsh-custom-header` plugin is neither required nor bundled.
@@ -38,13 +39,13 @@ The cleanup and its plugin lifecycle are exercised by [the standalone acceptance
 Install the prebuilt GitHub release tarball into the selected dsh profile:
 
 ```sh
-dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
 dsh web
 ```
 
-The standalone tarball is distributed as the `v0.3.3-standalone.2` GitHub prerelease asset and is not published to npm. Download that release asset, not the GitHub-generated source archive. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; `dsh plugin --profile web add dsh-codex` installs that upstream bundle instead. For the desktop app, use the same asset with `--profile desktop`.
+The standalone tarball is distributed as the `v0.3.3-standalone.3` GitHub prerelease asset and is not published to npm. Download that release asset, not the GitHub-generated source archive. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; `dsh plugin --profile web add dsh-codex` installs that upstream bundle instead. For the desktop app, use the same asset with `--profile desktop`.
 
-From a DeepSeek Harness source checkout, use `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"`. A plugin checkout can still be installed with `link:/absolute/path/to/dsh-codex` for development.
+From a DeepSeek Harness source checkout, use `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"`. A plugin checkout can still be installed with `link:/absolute/path/to/dsh-codex` for development.
 
 Open **Settings → OpenAI Codex** and choose **Browser sign-in** or **Device code**. Browser sign-in shows an authorization link; click it to open the system browser, which returns to the dsh host's localhost callback when both run on the same machine. Device code works when the browser is on another machine. The account page shows live Codex quota bars and exact remaining percentages; exact credit balances or workspace limits appear only when the account API supplies them.
 
@@ -63,7 +64,7 @@ dsh plugin --profile web exec dsh-codex logout
 For `dsh-tui`, install the same tarball into that profile:
 
 ```sh
-dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
+dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
 ```
 
 After restarting the TUI, `/model` lists the `openai-codex` catalog. With no explicit route or saved selection, the TUI adopts the bundle's `gpt-5.6-sol` default. Use `/codex status|login|logout|usage|config` for the account and live settings; `/codex set backend-fallback on|off` controls automatic model recovery, while the remaining switches are listed by `/codex set`. `/codex login` shows a browser URL, and `/codex login device` shows a device code for remote terminals. The TUI's `/settings` also exposes Codex's scalar controls through the same dsh settings namespace. Model visibility and the proxy URL remain editable in Web Settings. Both front doors share credentials and live preferences.
@@ -121,6 +122,15 @@ Open **Settings → OpenAI Codex → Network proxy** to select one of three scop
 The URL accepts `http://` and `https://` proxies. Leave it blank to use `DSH_CODEX_PROXY`, then the standard `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` environment variables. The default mode is **Follow dsh**, so installing the plugin never silently changes the process dispatcher.
 
 Saving a proxy URL keeps the setting first, then checks connectivity from that URL with a 10-second deadline against OpenAI's public `https://auth.openai.com/.well-known/openid-configuration` endpoint. The check reports success, an HTTP rejection, a timeout, or a network error; a failed check keeps the saved URL and never blocks the save. It sends no OAuth, model, or quota traffic, does not change the selected scope, and says nothing about account permissions.
+
+## Bundled proxy nodes
+
+The bundle also ships the `dsh-net-proxy` node manager: a mihomo core and geodata are bundled under `bin/net-proxy/`, so the proxy works without installing another proxy client. The plugin settings page imports a Clash-format subscription link, measures node latency, pins a node or keeps the fastest one, and enables or disables the proxy.
+
+- **Scope.** `Codex only` is the default and routes only Codex traffic. Switch to `Whole dsh` to route all host traffic through the selected node.
+- **Platform.** The bundled core is Windows x64 only; the plugin code itself is platform-neutral.
+- **Do not enable both.** Do not enable this built-in proxy and the standalone `dsh-net-proxy` plugin at the same time: both would start their own core and compete for the same local state and port.
+- The bundled core and geodata keep their own licenses; third-party notices and the SHA-256 of the shipped bytes are in [docs/third-party-notices.md](docs/third-party-notices.md).
 
 ## Images
 

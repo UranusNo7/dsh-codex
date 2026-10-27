@@ -97,9 +97,22 @@ import {
   OPENAI_CODEX_IMAGE_MODELS,
 } from "./image-model.ts";
 import type { OpenAICodexImageModel } from "./image-model.ts";
+import { apply as applyNetworkProxy } from "./net-proxy/index.js";
 
 export { OpenAICodexService } from "./service.ts";
 export type { OpenAICodexServiceOptions } from "./service.ts";
+export {
+  getNetworkProxyScope,
+  NETWORK_PROXY_BASE_PATH,
+  NETWORK_PROXY_SCOPE_DEFAULT,
+  networkProxyCodexUrl,
+  networkProxyOwnsGlobal,
+  setNetworkProxyScope,
+} from "./net-proxy/index.js";
+export type {
+  NetworkProxyScope,
+  NetworkProxySnapshot,
+} from "./net-proxy/index.js";
 export {
   DEFAULT_PROXY_PREFERENCES,
   normalizeProxyUrl,
@@ -357,6 +370,12 @@ export function apply(ctx: Context, config: Config): void {
       () => service.proxy.apply()
     )
   );
+  // Bundled mihomo host: routes under /plugins/dsh-openai-codex/network-proxy.
+  // "codex" scope (default) only hands its mixed-port URL to the transport
+  // above; "global" scope additionally takes over the process dispatcher.
+  ctx.inject(["webServer"], (webCtx) => {
+    applyNetworkProxy(webCtx);
+  });
   ctx.inject(["tools", "fs", "attachments"], (toolCtx) => {
     toolCtx.tools.register(
       imagegenTool(toolCtx, credentials, imageTools, service.proxy.fetch)

@@ -19,12 +19,13 @@
 - 在 Web 输入框提供按会话生效的 Fast Mode 开关与紧凑的每周额度指示器
 - 可选的后端授权模型恢复，包括隐藏的 Luna Reserve 路由
 - 可选择仅 Codex 或整个进程范围的三态 HTTP(S) 代理设置
+- 内置出网代理节点管理：打包 mihomo 内核，支持订阅导入、节点测速、自动或固定节点，默认仅 Codex、可切换整个 dsh，仅 Windows x64
 
 ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只使用 ChatGPT Codex 后端，不会把订阅转换成通用 OpenAI API 凭据。
 
 ## 一体化版本
 
-`0.3.3-standalone.2` 是自包含的 fork 构建，定位为**基础 dsh profile 中唯一的 Codex 插件**。它以 `v0.3.3-standalone.2` 的 GitHub 预发布资源分发；未发布到 npm。
+`0.3.3-standalone.3` 是自包含的 fork 构建，定位为**基础 dsh profile 中唯一的 Codex 插件**。它以 `v0.3.3-standalone.3` 的 GitHub 预发布资源分发；未发布到 npm。
 
 - **仅 Codex 的冗余提权清理。** GPT 模型在普通写操作中习惯性附带 `sandbox_permissions` 与 `justification` 时，工具调用不再因此失败。只有同时满足以下条件才会移除这两个参数：已能确定当前沙箱模式、且请求目标不严格宽于当前模式（`requested <= current`）、当前请求 provider 严格为 `openai-codex`、工具属于 `bash`／`pwsh`／`write`／`edit`、且该工具的 schema 声明了 dsh 原生提权契约。真正扩大沙箱权限的请求会完整保留参数，继续进入 dsh 自己的审批流程。在 Codex 路径上该能力取代独立的 `dsh-gpt-compat` 插件；它不改变也不替代其他 API provider 的兼容处理。
 - **不做请求头伪装。** 本插件不会全局改写 `User-Agent`／`Originator`，也不会统一冒充 `codex_cli_rs`；各 provider 与协议路径保留自身需要的请求头。独立的 `dsh-custom-header` 插件既不需要，也没有被打包。
@@ -38,13 +39,13 @@ ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只
 把 GitHub Release 中预构建的一体化安装包安装到选定的 dsh profile：
 
 ```sh
-dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
 dsh web
 ```
 
-该安装包以 `v0.3.3-standalone.2` 的 GitHub 预发布资源分发，未发布到 npm。请下载 Release 资源，不要安装 GitHub 自动生成的源码压缩包。npm registry 上的 `dsh-codex` 仍是上游版本，不包含这些一体化改动；`dsh plugin --profile web add dsh-codex` 安装的是那个上游 bundle。桌面端应用请改用同一资源并传 `--profile desktop`。
+该安装包以 `v0.3.3-standalone.3` 的 GitHub 预发布资源分发，未发布到 npm。请下载 Release 资源，不要安装 GitHub 自动生成的源码压缩包。npm registry 上的 `dsh-codex` 仍是上游版本，不包含这些一体化改动；`dsh plugin --profile web add dsh-codex` 安装的是那个上游 bundle。桌面端应用请改用同一资源并传 `--profile desktop`。
 
-从 DeepSeek Harness 源码 checkout 运行时，使用 `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"`。开发插件时仍可用 `link:/absolute/path/to/dsh-codex` 安装本地 checkout。
+从 DeepSeek Harness 源码 checkout 运行时，使用 `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"`。开发插件时仍可用 `link:/absolute/path/to/dsh-codex` 安装本地 checkout。
 
 打开 **设置 → OpenAI Codex**，选择 **浏览器登录** 或 **设备码登录**。浏览器登录会给出授权链接；点击后在系统浏览器完成授权。当浏览器和 dsh 宿主位于同一台机器时，localhost 回调会完成登录；远端浏览器可以使用设备码。账号页面会显示实时 Codex 额度进度条与精确剩余百分比；只有账号接口提供信用余额或工作区限额时，才会一并显示精确数值。
 
@@ -63,7 +64,7 @@ dsh plugin --profile web exec dsh-codex logout
 在 `dsh-tui` 中使用时，把 bundle 安装到同一个 profile：
 
 ```sh
-dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
+dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
 ```
 
 重新启动 TUI 后，`/model` 会列出 `openai-codex` 的模型；没有显式模型配置或已保存选择时，TUI 会采用 bundle 注册的 `gpt-5.6-sol`。`/codex status|login|logout|usage|config` 用于管理账号与查看配置；`/codex set backend-fallback on|off` 控制自动模型恢复，其余开关可通过 `/codex set` 查看。`/codex login` 会给出浏览器链接，远端终端可用 `/codex login device` 获取设备码。TUI 的 `/settings` 也通过同一个 dsh 设置命名空间编辑 Codex 的标量设置；模型可见性与代理 URL 仍在 Web 设置页编辑。两个界面共用凭据和实时偏好。
@@ -121,6 +122,15 @@ bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`，并选择 Code
 代理 URL 支持 `http://` 与 `https://`。留空时依次使用 `DSH_CODEX_PROXY`，以及标准的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与 `NO_PROXY` 环境变量。默认模式是 **跟随 dsh**，因此安装插件不会静默改变整个进程的 dispatcher。
 
 保存代理 URL 时会先保存设置，再用该 URL 在 10 秒内探测 OpenAI 的公开地址 `https://auth.openai.com/.well-known/openid-configuration`：结果分为成功、HTTP 拒绝、超时和网络错误。探测失败不会撤销已保存的 URL，也不会阻止保存；它不发送 OAuth、模型或额度请求，不改变所选代理范围，也不代表账号权限状况。
+
+## 内置出网代理
+
+本 bundle 同时打包了 `dsh-net-proxy` 的节点管理能力：mihomo 内核与 geodata 位于 `bin/net-proxy/`，无需再安装其他代理客户端。插件设置页可导入 Clash 格式订阅、测量节点延迟、固定节点或自动选择最快节点，并启用或停用代理。
+
+- **范围。** 默认 **仅 Codex**，只代理 Codex 流量；可切换为 **整个 dsh**，让所有宿主流量走所选节点。
+- **平台。** 内置内核仅支持 Windows x64；插件自身代码与平台无关。
+- **不要同时启用。** 不要与独立的 `dsh-net-proxy` 插件同时启用：两者会各自启动一个内核，并争用同一份本地状态与端口。
+- 内置内核与 geodata 各自保留原有许可；第三方声明与实际随包字节的 SHA-256 见 [docs/third-party-notices.md](docs/third-party-notices.md)。
 
 ## 图片
 

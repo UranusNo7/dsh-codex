@@ -11,6 +11,10 @@ import type { OpenAICodexAuthStatus } from "./auth.ts";
 import { OpenAICodexCredentialStore } from "./store.ts";
 import { OpenAICodexProxyTransport } from "./proxy.ts";
 import type { ProxyPreferences } from "./proxy.ts";
+import {
+  networkProxyCodexUrl,
+  networkProxyOwnsGlobal,
+} from "./net-proxy/index.js";
 import { ImageToolPolicy } from "./tool-policy.ts";
 import type {
   ContextWindowPreferences,
@@ -74,8 +78,12 @@ export class OpenAICodexService {
       ...preferences
     } = options;
     this.policy = new ImageToolPolicy(preferences, modelCatalog);
-    this.proxy = new OpenAICodexProxyTransport(() =>
-      this.policy.proxySnapshot()
+    this.proxy = new OpenAICodexProxyTransport(
+      () => this.policy.proxySnapshot(),
+      {
+        managedProxyUrl: networkProxyCodexUrl,
+        netProxyOwnsGlobal: networkProxyOwnsGlobal,
+      }
     );
     void this.proxy.apply().catch((error: unknown) => {
       process.stderr.write(

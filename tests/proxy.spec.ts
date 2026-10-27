@@ -5,6 +5,7 @@ import {
   EnvHttpProxyAgent,
   getGlobalDispatcher,
   ProxyAgent,
+  setGlobalDispatcher,
 } from "undici";
 import type { Dispatcher } from "undici";
 import {
@@ -58,6 +59,7 @@ const transports = new Set<OpenAICodexProxyTransport>();
 afterEach(async () => {
   await Promise.all([...transports].map(async (transport) => transport.dispose()));
   transports.clear();
+  vi.unstubAllGlobals();
   undiciMock.fetch.mockReset();
   if (undiciMock.actualFetch !== undefined) {
     undiciMock.fetch.mockImplementation(undiciMock.actualFetch);
@@ -138,6 +140,102 @@ describe("OpenAICodexProxyTransport", () => {
         });
       });
     }
+  });
+
+  it("routes Codex traffic through the bundled network proxy mixed port", async () => {
+    let dispatcher: Dispatcher | undefined;
+    undiciMock.fetch.mockImplementation(async (_input, init) => {
+      dispatcher = init?.dispatcher as Dispatcher;
+      return { status: 200, body: null } as unknown as Response;
+    });
+    const transport = new OpenAICodexProxyTransport(
+      () => ({ proxyMode: "off", proxyUrl: "" }),
+      { managedProxyUrl: () => "http://127.0.0.1:2345" }
+    );
+    transports.add(transport);
+
+    await transport.fetch("http://codex-probe.invalid/test");
+
+    expect(dispatcher).toBeInstanceOf(ProxyAgent);
+    expect(undiciMock.fetch).toHaveBeenCalledWith(
+      "http://codex-probe.invalid/test",
+      expect.objectContaining({ dispatcher })
+    );
+  });
+
+  it("keeps an explicit scoped proxy ahead of the bundled network proxy", async () => {
+    const managed = vi.fn(() => "http://127.0.0.1:2345");
+    undiciMock.fetch.mockImplementation(
+      async () => ({ status: 200, body: null }) as unknown as Response
+    );
+    const transport = new OpenAICodexProxyTransport(
+      () => ({ proxyMode: "scoped", proxyUrl: "http://127.0.0.1:7890" }),
+      { managedProxyUrl: managed }
+    );
+    transports.add(transport);
+
+    await transport.fetch("http://codex-probe.invalid/test");
+
+    expect(managed).not.toHaveBeenCalled();
+    expect(undiciMock.fetch).toHaveBeenCalledTimes(1);
+    const [, init] = undiciMock.fetch.mock.calls[0] as [string, Record<string, unknown>];
+    expect(init["dispatcher"]).toBeInstanceOf(ProxyAgent);
+  });
+
+  it("does not stack a second global policy while the bundled proxy owns the dispatcher", async () => {
+    const original = getGlobalDispatcher();
+    const transport = new OpenAICodexProxyTransport(
+      () => ({ proxyMode: "global", proxyUrl: "http://127.0.0.1:7890" }),
+      { netProxyOwnsGlobal: () => true }
+    );
+    transports.add(transport);
+
+    await transport.apply();
+
+    expect(getGlobalDispatcher()).toBe(original);
+  });
+
+  it("keeps the bundled dispatcher when ownership moves while a manual global policy is active", async () => {
+    const original = getGlobalDispatcher();
+    let owns = false;
+    const transport = new OpenAICodexProxyTransport(
+      () => ({ proxyMode: "global", proxyUrl: "http://127.0.0.1:7890" }),
+      { netProxyOwnsGlobal: () => owns }
+    );
+    transports.add(transport);
+
+    // 1. Manual global policy is active and owns the dispatcher.
+    await transport.apply();
+    const manualDispatcher = getGlobalDispatcher();
+    expect(manualDispatcher).not.toBe(original);
+
+    // 2. The bundled proxy takes the slot over in "global" scope.
+    const bundledDispatcher = {
+      dispatch() {
+        throw new Error("bundled dispatcher must stay installed");
+      },
+    } as unknown as Dispatcher;
+    owns = true;
+    setGlobalDispatcher(bundledDispatcher);
+
+    // 3. A Codex fetch must not restore the older manual dispatcher over it.
+    const globalFetch = vi.fn(async () => await Promise.resolve(new Response("ok")));
+    vi.stubGlobal("fetch", globalFetch);
+    const response = await transport.fetch("http://codex-probe.invalid/test");
+    expect(await response.text()).toBe("ok");
+    expect(globalFetch).toHaveBeenCalledTimes(1);
+    expect(getGlobalDispatcher()).toBe(bundledDispatcher);
+
+    // 4. Bundled proxy off: it hands the manual dispatcher back; the next Codex
+    //    call reconciles against the saved preferences without re-installing a
+    //    duplicate policy on top.
+    owns = false;
+    setGlobalDispatcher(manualDispatcher);
+    await transport.apply();
+    expect(getGlobalDispatcher()).toBe(manualDispatcher);
+
+    await transport.dispose();
+    transports.delete(transport);
   });
 });
 
