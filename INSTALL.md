@@ -8,7 +8,7 @@ Install the public `dsh-codex` bundle into the requested DeepSeek Harness profil
 
 ## Defaults
 
-- **Package:** for the standalone build, install the GitHub prerelease asset `dsh-codex-0.3.3-standalone.1.tgz` from `https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz`. It is not published to npm. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; use it only when the user explicitly wants the upstream registry bundle.
+- **Package:** for the standalone build, install the GitHub prerelease asset `dsh-codex-0.3.3-standalone.2.tgz` from `https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz`. It is not published to npm. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; use it only when the user explicitly wants the upstream registry bundle.
 - **Profile:** use the user-named profile; otherwise use `web`.
 - **Launcher:** prefer an installed `dsh`. From a DeepSeek Harness source checkout, run commands in that checkout and replace `dsh` with `pnpm dsh`.
 - **Search mode:** use `live` unless the user requests `cached` or `indexed`.
@@ -34,7 +34,7 @@ Run `dsh --version` or `dsh --help`. From a source checkout, run `pnpm dsh --ver
 For the standalone build, install the published prerelease tarball. It already contains the built `lib/` entries, the bundle patch, and the third-party notices, so no build step is required:
 
 ```sh
-dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
 ```
 
 The asset above is the supported standalone distribution; it is not on npm. Do not install the GitHub-generated source archive. Do not additionally install `dsh-custom-header` or `dsh-gpt-compat`: this build already contains the Codex-only redundancy cleanup and intentionally does not rewrite request headers.
@@ -48,7 +48,7 @@ dsh plugin --profile web add dsh-codex
 From a Harness source checkout with the standalone tarball:
 
 ```sh
-pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
+pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
 ```
 
 If the user explicitly supplied a local checkout, first require `package.json`, `cordis.patch.yml`, `lib/index.js`, `lib/client.js`, and `lib/bin.js`, and require `package.json.name` to equal `dsh-codex`. Then install its normalized absolute path, using forward slashes on Windows:

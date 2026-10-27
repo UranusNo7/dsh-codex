@@ -2,12 +2,15 @@
 
 import { createModels } from "@earendil-works/pi-ai";
 import type {
+  Api,
   AuthContext,
   Context as PiContext,
   FetchFunction,
+  Model,
   MutableModels,
   Provider,
   SimpleStreamOptions,
+  ThinkingLevelMap,
 } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "./oauth-provider.ts";
 import { resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
@@ -39,6 +42,7 @@ import {
 const GPT_6_ASTRA = "gpt-6-astra";
 const GPT_6_SOL = "gpt-6-sol";
 const GPT_6_LUNA = "gpt-6-luna";
+const GPT_6_1_TERRA = "gpt-6.1-terra";
 const GPT_5_6_LUNA = "gpt-5.6-luna";
 /** Backend-authorized Luna Reserve route; deliberately hidden from discovery. */
 export const OPENAI_CODEX_LUNA_RESERVE_MODEL = "gpt-reserve";
@@ -48,6 +52,7 @@ const OPENAI_CODEX_MODEL_ORDER = new Map<string, number>(
     GPT_6_ASTRA,
     GPT_6_SOL,
     GPT_6_LUNA,
+    GPT_6_1_TERRA,
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     GPT_5_6_LUNA,
@@ -55,7 +60,20 @@ const OPENAI_CODEX_MODEL_ORDER = new Map<string, number>(
   ].map((id, index) => [id, index])
 );
 
-const CURRENT_CODEX_MODELS = [
+/** Product metadata for Codex releases the bundled pi-ai catalog may lag behind. */
+type CurrentCodexModelEntry = {
+  id: string;
+  name: string;
+  template: string;
+  cost: Model<Api>["cost"];
+  /** Overrides the shared GPT-6 defaults; Terra exposes a 500K window. */
+  contextWindow?: number;
+  maxTokens?: number;
+  /** Overrides the shared reasoning map; omitted entries keep the GPT-6 default. */
+  thinkingLevelMap?: ThinkingLevelMap;
+};
+
+const CURRENT_CODEX_MODELS: readonly CurrentCodexModelEntry[] = [
   {
     id: GPT_6_SOL,
     name: "GPT-6 Sol",
@@ -96,6 +114,28 @@ const CURRENT_CODEX_MODELS = [
       ],
     },
   },
+  {
+    id: GPT_6_1_TERRA,
+    name: "GPT-6.1 Terra",
+    template: "gpt-5.6-terra",
+    cost: {
+      input: 1,
+      output: 5,
+      cacheRead: 0.05,
+      cacheWrite: 1,
+    },
+    contextWindow: 500_000,
+    maxTokens: 128_000,
+    thinkingLevelMap: {
+      off: null,
+      minimal: "low",
+      low: "low",
+      medium: "medium",
+      high: "high",
+      xhigh: "xhigh",
+      max: "max",
+    },
+  },
 ];
 
 /** Add current Codex releases missing from the compatible pi-ai catalog. */
@@ -120,9 +160,9 @@ export function withCurrentOpenAICodexModels(provider: Provider): Provider {
           id: entry.id,
           name: entry.name,
           cost: entry.cost,
-          contextWindow: 272_000,
-          maxTokens: 128_000,
-          thinkingLevelMap: {
+          contextWindow: entry.contextWindow ?? 272_000,
+          maxTokens: entry.maxTokens ?? 128_000,
+          thinkingLevelMap: entry.thinkingLevelMap ?? {
             off: "none",
             minimal: "low",
             low: "low",

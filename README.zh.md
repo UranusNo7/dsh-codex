@@ -9,7 +9,7 @@
 `dsh-codex` 是一个独立的 dsh bundle，提供：
 
 - 在 dsh 设置面板或独立 CLI 中完成 ChatGPT OAuth 登录，并自动刷新 token
-- Codex GPT 模型目录；账号提供视觉模型时自动声明其图片输入能力
+- Codex GPT 模型目录，包含内置 GPT-6.1 Terra（默认 500K 上下文，支持文本与图片输入）；账号提供视觉模型时自动声明其图片输入能力
 - 可实时覆盖 dsh 用于上下文用量显示与压缩策略的客户端窗口容量
 - 经标准 LLM 服务运行的流式响应、工具调用、推理回放、提示词缓存与 dsh 压缩
 - 通过 dsh 现有 `web_search` 工具使用 Codex 独立联网搜索
@@ -24,7 +24,7 @@ ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只
 
 ## 一体化版本
 
-`0.3.3-standalone.1` 是自包含的 fork 构建，定位为**基础 dsh profile 中唯一的 Codex 插件**。它以 `v0.3.3-standalone.1` 的 GitHub 预发布资源分发；未发布到 npm。
+`0.3.3-standalone.2` 是自包含的 fork 构建，定位为**基础 dsh profile 中唯一的 Codex 插件**。它以 `v0.3.3-standalone.2` 的 GitHub 预发布资源分发；未发布到 npm。
 
 - **仅 Codex 的冗余提权清理。** GPT 模型在普通写操作中习惯性附带 `sandbox_permissions` 与 `justification` 时，工具调用不再因此失败。只有同时满足以下条件才会移除这两个参数：已能确定当前沙箱模式、且请求目标不严格宽于当前模式（`requested <= current`）、当前请求 provider 严格为 `openai-codex`、工具属于 `bash`／`pwsh`／`write`／`edit`、且该工具的 schema 声明了 dsh 原生提权契约。真正扩大沙箱权限的请求会完整保留参数，继续进入 dsh 自己的审批流程。在 Codex 路径上该能力取代独立的 `dsh-gpt-compat` 插件；它不改变也不替代其他 API provider 的兼容处理。
 - **不做请求头伪装。** 本插件不会全局改写 `User-Agent`／`Originator`，也不会统一冒充 `codex_cli_rs`；各 provider 与协议路径保留自身需要的请求头。独立的 `dsh-custom-header` 插件既不需要，也没有被打包。
@@ -38,13 +38,13 @@ ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只
 把 GitHub Release 中预构建的一体化安装包安装到选定的 dsh profile：
 
 ```sh
-dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
 dsh web
 ```
 
-该安装包以 `v0.3.3-standalone.1` 的 GitHub 预发布资源分发，未发布到 npm。请下载 Release 资源，不要安装 GitHub 自动生成的源码压缩包。npm registry 上的 `dsh-codex` 仍是上游版本，不包含这些一体化改动；`dsh plugin --profile web add dsh-codex` 安装的是那个上游 bundle。桌面端应用请改用同一资源并传 `--profile desktop`。
+该安装包以 `v0.3.3-standalone.2` 的 GitHub 预发布资源分发，未发布到 npm。请下载 Release 资源，不要安装 GitHub 自动生成的源码压缩包。npm registry 上的 `dsh-codex` 仍是上游版本，不包含这些一体化改动；`dsh plugin --profile web add dsh-codex` 安装的是那个上游 bundle。桌面端应用请改用同一资源并传 `--profile desktop`。
 
-从 DeepSeek Harness 源码 checkout 运行时，使用 `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"`。开发插件时仍可用 `link:/absolute/path/to/dsh-codex` 安装本地 checkout。
+从 DeepSeek Harness 源码 checkout 运行时，使用 `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"`。开发插件时仍可用 `link:/absolute/path/to/dsh-codex` 安装本地 checkout。
 
 打开 **设置 → OpenAI Codex**，选择 **浏览器登录** 或 **设备码登录**。浏览器登录会给出授权链接；点击后在系统浏览器完成授权。当浏览器和 dsh 宿主位于同一台机器时，localhost 回调会完成登录；远端浏览器可以使用设备码。账号页面会显示实时 Codex 额度进度条与精确剩余百分比；只有账号接口提供信用余额或工作区限额时，才会一并显示精确数值。
 
@@ -63,14 +63,14 @@ dsh plugin --profile web exec dsh-codex logout
 在 `dsh-tui` 中使用时，把 bundle 安装到同一个 profile：
 
 ```sh
-dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
+dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
 ```
 
 重新启动 TUI 后，`/model` 会列出 `openai-codex` 的模型；没有显式模型配置或已保存选择时，TUI 会采用 bundle 注册的 `gpt-5.6-sol`。`/codex status|login|logout|usage|config` 用于管理账号与查看配置；`/codex set backend-fallback on|off` 控制自动模型恢复，其余开关可通过 `/codex set` 查看。`/codex login` 会给出浏览器链接，远端终端可用 `/codex login device` 获取设备码。TUI 的 `/settings` 也通过同一个 dsh 设置命名空间编辑 Codex 的标量设置；模型可见性与代理 URL 仍在 Web 设置页编辑。两个界面共用凭据和实时偏好。
 
 Codex、Claude Code 及其他自动化 agent 应直接遵循 [INSTALL.md](INSTALL.md)。它是一份完整且可重复执行的 runbook，不要求安装者阅读源码或设计文档。
 
-bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`，并选择 Codex 搜索提供方。dsh settings 中已经保存的模型仍然优先；模型选择器可以切换到当前账号可用的其他 Codex 模型。
+bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`，并选择 Codex 搜索提供方。dsh settings 中已经保存的模型仍然优先；模型选择器可以切换到当前账号可用的其他 Codex 模型。GPT-6.1 Terra 是可选的内置模型，不改变 `gpt-5.6-sol` 默认值。
 
 自动模型回退默认关闭。启用 **设置 → OpenAI Codex** 中的开关后，插件只会遵循 OpenAI 为当前账号返回的恢复指令：普通恢复按后端给出的替代模型顺序选择；`luna_reserve` 指令则解析官方隐藏的 `gpt-reserve` 路由，并沿用 Luna 的上下文、推理与图片能力。该决定发生在 dsh 准备重试之前，因此实际模型、上下文预算、图片准入与 Session 请求头保持一致。视觉路由绝不会回退到纯文本模型，附件、`read_image` 与 `imagegen` 会继续可用。没有兼容回退或额度刷新失败时，原始额度错误会继续交给 Harness 的正常重试路径。`imagegen` 与该切换相互独立，并使用设置页中选定的图片后端。
 

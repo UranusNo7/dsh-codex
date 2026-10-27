@@ -247,7 +247,9 @@ describe('standalone bundle composition', () => {
     ])
     const models = await composed.ctx.llm.listModels(OpenAICodex.OPENAI_CODEX_PROVIDER)
     expect(models.length).toBeGreaterThan(0)
-    expect(models.map((model) => model.id)).toContain('gpt-6-sol')
+    expect(models.map((model) => model.id)).toEqual(
+      expect.arrayContaining(['gpt-6-sol', 'gpt-6.1-terra'])
+    )
 
     // The real Web registry keeps the plugin's standalone search provider.
     const searchProviders = (composed.ctx.web as unknown as {

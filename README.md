@@ -9,7 +9,7 @@ Use a ChatGPT subscription in [DeepSeek Harness](https://github.com/deepseek-ai/
 `dsh-codex` is an independent dsh bundle. It adds:
 
 - ChatGPT OAuth from the dsh Settings panel or a standalone CLI, with automatic token refresh
-- the Codex GPT catalog, including vision-capable models when the account offers them
+- the Codex GPT catalog, including bundled GPT-6.1 Terra (500K default context, text and image input) alongside vision-capable models when the account offers them
 - a live client-side context-window capacity override for dsh's token meter and compaction policy
 - streaming, tool calls, reasoning replay, prompt caching, and dsh compaction through the normal LLM service
 - Codex standalone web search through dsh's existing `web_search` tool
@@ -24,7 +24,7 @@ ChatGPT subscription authentication and usage-based OpenAI API access are differ
 
 ## Standalone bundle
 
-Version `0.3.3-standalone.1` is the self-contained fork build, intended to be the only Codex plugin in a base dsh profile. It is distributed as the `v0.3.3-standalone.1` GitHub prerelease asset; it is not published to npm.
+Version `0.3.3-standalone.2` is the self-contained fork build, intended to be the only Codex plugin in a base dsh profile. It is distributed as the `v0.3.3-standalone.2` GitHub prerelease asset; it is not published to npm.
 
 - **Codex-only redundancy cleanup.** A GPT model that habitually sends `sandbox_permissions` and `justification` on ordinary writes no longer fails those calls. The bundle strips those two arguments only when the current sandbox mode is known and the requested mode is not strictly wider than it (`requested <= current`), and only when the routed provider is exactly `openai-codex`, the tool is one of `bash`, `pwsh`, `write`, or `edit`, and that tool's schema declares dsh's native escalation contract. A request that genuinely widens the sandbox keeps both arguments and still enters dsh's own approval flow. On the Codex path this replaces the separate `dsh-gpt-compat` plugin; it does not change or replace compatibility handling for any other API provider.
 - **No header spoofing.** The bundle does not globally rewrite `User-Agent` or `Originator`, and it does not uniformly impersonate `codex_cli_rs`; each provider and protocol path keeps the request headers it requires. The separate `dsh-custom-header` plugin is neither required nor bundled.
@@ -38,13 +38,13 @@ The cleanup and its plugin lifecycle are exercised by [the standalone acceptance
 Install the prebuilt GitHub release tarball into the selected dsh profile:
 
 ```sh
-dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
 dsh web
 ```
 
-The standalone tarball is distributed as the `v0.3.3-standalone.1` GitHub prerelease asset and is not published to npm. Download that release asset, not the GitHub-generated source archive. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; `dsh plugin --profile web add dsh-codex` installs that upstream bundle instead. For the desktop app, use the same asset with `--profile desktop`.
+The standalone tarball is distributed as the `v0.3.3-standalone.2` GitHub prerelease asset and is not published to npm. Download that release asset, not the GitHub-generated source archive. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; `dsh plugin --profile web add dsh-codex` installs that upstream bundle instead. For the desktop app, use the same asset with `--profile desktop`.
 
-From a DeepSeek Harness source checkout, use `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"`. A plugin checkout can still be installed with `link:/absolute/path/to/dsh-codex` for development.
+From a DeepSeek Harness source checkout, use `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"`. A plugin checkout can still be installed with `link:/absolute/path/to/dsh-codex` for development.
 
 Open **Settings → OpenAI Codex** and choose **Browser sign-in** or **Device code**. Browser sign-in shows an authorization link; click it to open the system browser, which returns to the dsh host's localhost callback when both run on the same machine. Device code works when the browser is on another machine. The account page shows live Codex quota bars and exact remaining percentages; exact credit balances or workspace limits appear only when the account API supplies them.
 
@@ -63,14 +63,14 @@ dsh plugin --profile web exec dsh-codex logout
 For `dsh-tui`, install the same tarball into that profile:
 
 ```sh
-dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
+dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
 ```
 
 After restarting the TUI, `/model` lists the `openai-codex` catalog. With no explicit route or saved selection, the TUI adopts the bundle's `gpt-5.6-sol` default. Use `/codex status|login|logout|usage|config` for the account and live settings; `/codex set backend-fallback on|off` controls automatic model recovery, while the remaining switches are listed by `/codex set`. `/codex login` shows a browser URL, and `/codex login device` shows a device code for remote terminals. The TUI's `/settings` also exposes Codex's scalar controls through the same dsh settings namespace. Model visibility and the proxy URL remain editable in Web Settings. Both front doors share credentials and live preferences.
 
 Codex, Claude Code, and other automation agents should follow [INSTALL.md](INSTALL.md). It is a complete, idempotent runbook and does not require reading this repository's source or design notes.
 
-The bundle selects `openai-codex` / `gpt-5.6-sol` for new agents and selects the Codex search provider. A model already saved in dsh settings still takes precedence; the model picker can select any other Codex model visible to the signed-in account.
+The bundle selects `openai-codex` / `gpt-5.6-sol` for new agents and selects the Codex search provider. A model already saved in dsh settings still takes precedence; the model picker can select any other Codex model visible to the signed-in account. GPT-6.1 Terra is an optional bundled model; it does not change the `gpt-5.6-sol` default.
 
 Automatic model fallback is off by default. When enabled under **Settings → OpenAI Codex**, the plugin follows only a recovery instruction returned by OpenAI for the current account. Ordinary recovery uses the backend's ordered replacement list; a `luna_reserve` instruction resolves the official hidden `gpt-reserve` route with Luna's context, reasoning, and image capabilities. The decision happens before dsh prepares the retry, so the actual model, context budget, image admission, and Session request header agree. A vision route never falls back to a text-only replacement, keeping attachments, `read_image`, and `imagegen` available. If no compatible fallback exists—or the usage refresh fails—the original quota failure continues through Harness's normal retry path. `imagegen` remains independent and uses the image backend selected in Settings.
 

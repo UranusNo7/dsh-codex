@@ -1,6 +1,6 @@
 # 项目结构
 
-本文件只记录仓库既有目录职责与 `0.3.3-standalone.1` 新增模块的落点，便于后续维护与打包白名单核对。
+本文件只记录仓库既有目录职责与 `0.3.3-standalone.2` 新增模块的落点，便于后续维护与打包白名单核对。
 
 ## 目录职责
 
@@ -21,6 +21,10 @@
   一律保留。代码改编自 MIT 许可的 dsh-gpt-compat，来源与许可见 `docs/third-party-notices.md`。
 - `src/index.ts`：以 `ctx.inject(["tools", "sandboxPolicy"], ...)` 可选挂载上述清理，listener 随
   插件 fiber 释放；无 tools/sandboxPolicy 的基础组合仍可加载，未新增硬依赖或配置开关。
+- `src/adapter.ts`：内置模型目录补充 `gpt-6.1-terra`（复用 pi-ai 的 `gpt-5.6-terra` 请求模板，
+  默认 `contextWindow` 500,000、`maxTokens` 128,000，文本/图片输入；目录不声明 `off`，DSH 将
+  `minimal` 映射为 `low` 并支持 `low`/`medium`/`high`/`xhigh`/`max`，`ultra` 因 pi-ai
+  `ThinkingLevel` 类型边界不提供），排序与其他 `gpt-6-*` 条目同级；未新增模块、依赖或配置开关。
 - `tests/tool-compat.spec.ts`：真实 ToolRuntime + approval seam 下的清理/审批/路由/生命周期覆盖。
 - `tests/standalone.spec.ts`：仅基础 DSH 服务 + 本插件的端到端能力矩阵，见
   [standalone.md](./standalone.md)。

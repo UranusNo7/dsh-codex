@@ -291,6 +291,7 @@ describe("OpenAI Codex adapter policy", () => {
       "gpt-6-astra",
       "gpt-6-sol",
       "gpt-6-luna",
+      "gpt-6.1-terra",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
       "gpt-5.6-luna",
@@ -308,6 +309,10 @@ describe("OpenAI Codex adapter policy", () => {
       name: "GPT-6 Luna",
       contextWindow: 272_000,
     });
+    expect(catalog.find((model) => model.id === "gpt-6.1-terra")).toMatchObject({
+      name: "GPT-6.1 Terra",
+      contextWindow: 500_000,
+    });
     const models = createOpenAICodexModelProvider().getModels();
     expect(models.find((model) => model.id === "gpt-6-sol")).toMatchObject({
       maxTokens: 128_000,
@@ -318,6 +323,13 @@ describe("OpenAI Codex adapter policy", () => {
       maxTokens: 128_000,
       cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
       thinkingLevelMap: { off: "none", low: "low", max: "max" },
+    });
+    expect(models.find((model) => model.id === "gpt-6.1-terra")).toMatchObject({
+      maxTokens: 128_000,
+      contextWindow: 500_000,
+      input: ["text", "image"],
+      cost: { input: 1, output: 5, cacheRead: 0.05, cacheWrite: 1 },
+      thinkingLevelMap: { off: null, low: "low", max: "max" },
     });
   });
 
@@ -336,6 +348,7 @@ describe("OpenAI Codex adapter policy", () => {
       "gpt-6-astra",
       "gpt-6-sol",
       "gpt-6-luna",
+      "gpt-6.1-terra",
     ]);
     expect(provider.getModels()).toBe(supplemented);
     expect(withCurrentOpenAICodexModels({ ...current, getModels: () => [] }).getModels())
@@ -370,6 +383,7 @@ describe("OpenAI Codex adapter policy", () => {
         "gpt-6-astra",
         "gpt-6-luna",
         "gpt-6-sol",
+        "gpt-6.1-terra",
         "gpt-5.6-luna",
         "gpt-5.6-sol",
         "gpt-5.6-terra",

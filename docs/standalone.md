@@ -1,10 +1,10 @@
 # 一体化构建（standalone）：能力、验收与边界
 
-本文件说明 `0.3.3-standalone.1` 的定位、随包能力、已验证范围和尚未验证的部分。目标是**基础 dsh + 本插件**即可使用 Codex 订阅能力，不再安装 `dsh-custom-header` 或 `dsh-gpt-compat`。
+本文件说明 `0.3.3-standalone.2` 的定位、随包能力、已验证范围和尚未验证的部分。目标是**基础 dsh + 本插件**即可使用 Codex 订阅能力，不再安装 `dsh-custom-header` 或 `dsh-gpt-compat`。
 
 ## 定位
 
-- 目标 profile 只包含基础 DeepSeek Harness 组成与本 bundle。以 **GitHub 预发布**（tag `v0.3.3-standalone.1`）分发；未发布到 npm。
+- 目标 profile 只包含基础 DeepSeek Harness 组成与本 bundle。以 **GitHub 预发布**（tag `v0.3.3-standalone.2`）分发；未发布到 npm。
 - 需要具备 Codex 资格的 ChatGPT 套餐；套餐资格、模型权限、配额和后端行为由 OpenAI 控制。
 - 不会全局重写、也不会统一冒充 `codex_cli_rs` 请求头；各 provider 与协议路径保留自身需要的请求头。不自动化 ChatGPT 网页界面，也不读取 ChatGPT 会话或记忆。
 - 在 Codex 路径上替代 `dsh-gpt-compat` 的兼容处理，但不影响、也不替代其他 API provider 的兼容逻辑。
@@ -14,13 +14,21 @@
 
 | 能力 | 源码职责 |
 | --- | --- |
-| `openai-codex` 路由、模型目录、OAuth 登录与刷新 | `src/index.ts`、`src/adapter.ts`、`src/model-catalog.ts`、`src/oauth-*.ts`、`src/store.ts` |
+| `openai-codex` 路由、内置模型目录（含 `gpt-6.1-terra`）、OAuth 登录与刷新 | `src/index.ts`、`src/adapter.ts`、`src/model-catalog.ts`、`src/oauth-*.ts`、`src/store.ts` |
 | Codex 独立搜索 | `src/search.ts`、`src/search-event.ts` |
 | 设置页与账号页接口 | `src/auth-routes.ts`、`src/client/` |
 | `read_image` 的 HTTP(S) 输入与 `imagegen` | `src/read-image-enhancement.ts`、`src/imagegen.ts`、`src/public-http.ts` |
 | 三态网络代理与保存时连通性测试 | `src/proxy.ts`、`src/auth-routes.ts` |
 | **仅 Codex 的冗余提权清理** | `src/tool-compat.ts`，由 `src/index.ts` 通过 `ctx.inject(['tools', 'sandboxPolicy'])` 挂载 |
 | bundle 组成补丁 | `cordis.patch.yml` |
+
+内置模型目录补充（`src/adapter.ts`）：`gpt-6.1-terra` 复用 pi-ai 的 `gpt-5.6-terra` 请求模板，默认
+`context_window` 500,000、`maxTokens` 128,000，输入为文本与图片。推理档位不由目录声明 `off`
+（Codex 官方元数据未提供该档位，内置映射为 `off: null`）；DSH 将 `minimal` 映射为 `low`，并支持
+`low`/`medium`/`high`/`xhigh`/`max`。`ultra` 不提供，因为当前 pi-ai `ThinkingLevel` 类型边界未包含
+该档位。Codex `models_cache.json` 中该模型的新元数据（名称、输入模态、推理档位、默认
+`context_window`）会在加载后覆盖内置值。默认路由仍为 `gpt-5.6-sol`，本次目录补充不改变
+`0.3.3-standalone.2` 版本或发布物。
 
 提权清理规则（失败即保留，fail-closed）：
 
@@ -35,7 +43,7 @@
 | 范围 | 证据 | 结果 |
 | --- | --- | --- |
 | 一体化挂载（仅核心 + 本插件，无第三方插件） | `tests/standalone.spec.ts`：真实 `Context`、`ToolRuntime`、`SandboxPolicyService`、`SessionProjectionRuntime`、`SandboxedFileSystem`、`LlmRuntime`、`WebRuntime` | 通过 |
-| 模型目录 | 同上：`llm.listProviders()` 仅 `openai-codex`，`llm.listModels()` 含 `gpt-6-sol` | 通过 |
+| 模型目录 | 同上：`llm.listProviders()` 仅 `openai-codex`，`llm.listModels()` 含 `gpt-6-sol` 与内置 `gpt-6.1-terra`；`tests/model-catalog.spec.ts` 覆盖 Terra 的 500K 默认窗口与缓存元数据合并 | 通过 |
 | 独立搜索挂载 | 同上：真实 Web 注册表中的 `openai-codex` 搜索 provider | 通过 |
 | 账号／设置接口挂载 | 同上：记录 `webServer.register` 的 12 条路由，覆盖 auth、fast-mode、image-tools、response-api、context-window、models、model-fallback、proxy | 通过 |
 | `imagegen` 与 `read_image` 增强 | 同上：`imagegen` 工具已注册；agent 作用域上出现带 `url` 参数的 `read_image` 影子定义 | 通过 |
@@ -60,12 +68,15 @@
 - 开发基线：本 checkout 的 dsh `0.2.0-rc.1` 表层，实际验证 `tools/pre-execute` waterfall、`ctx.tools.get`、`session.requestHeader()` 与 `ctx.sandboxPolicy.resolve()`。
 - 目标运行时：桌面端 dsh `0.2.1-rc.2`。消费者烟测使用精确 `0.2.1-rc.2` 核心包与 Cordis `4.0.5`，从打包后的 `.tgz` 安装并加载本插件，23 项检查全部通过；其他 dsh 版本不作承诺。
 - `package.json` 的 peerDependencies 仍声明 `^0.2.0-rc.1` 系列，安装到 `0.2.1-rc.2` 时 `pnpm` 会报告 peer 范围冲突（例如 `@deepseek-ai/dsh-fs` 与 `@deepseek-ai/dsh-subagent` 的版本要求），安装本身成功且烟测通过；这不代表接口不兼容，也不构成全面升级依赖的理由。
+- 当前发布版本：`0.3.3-standalone.2`（GitHub 预发布，未发布 npm）。相对 `0.3.3-standalone.1`，本轮仅新增内置
+  `gpt-6.1-terra` 目录及对应测试/文档同步；协议、默认模型与既有能力不变。
 
-## 真实桌面基础 QA（本会话）
+## 真实桌面基础 QA（历史记录：`0.3.3-standalone.1`，本会话）
 
 - 在真实桌面 dsh `0.2.1-rc.2` 的 profile 中，bundle 清单不含 `dsh-custom-header` 与
-  `dsh-gpt-compat`；其他无关插件未为本次 QA 移除。已安装本地 `link:` 的
-  `0.3.3-standalone.1`（源码与本发布包同源）。
+  `dsh-gpt-compat`；其他无关插件未为本次 QA 移除。当时已安装本地 `link:` 的
+  `0.3.3-standalone.1`（源码与当时的发布包同源）。以下为 `.1` 轮次的历史记录，不描述
+  `0.3.3-standalone.2` 的桌面 QA。
 - 实测 `openai-codex` 路由下可选择 `gpt-6.1-sol`；`pwsh`、`write`、`read`、`edit` 对临时文件
   执行成功，并完成临时文件清理。
 - 该实测**未主动构造**带 `sandbox_permissions`/`justification` 的提权调用，也**未做**全量
@@ -88,9 +99,9 @@
 从 GitHub 预发布资源安装（桌面端用 `--profile desktop`，Web 用 `--profile web`）：
 
 ```sh
-dsh plugin --profile desktop add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.1/dsh-codex-0.3.3-standalone.1.tgz"
+dsh plugin --profile desktop add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.2/dsh-codex-0.3.3-standalone.2.tgz"
 ```
 
-该安装包以 `v0.3.3-standalone.1` GitHub 预发布资源分发，未发布到 npm。安装后重启桌面端
+该安装包以 `v0.3.3-standalone.2` GitHub 预发布资源分发，未发布到 npm。安装后重启桌面端
 dsh，再在 **设置 → OpenAI Codex** 完成账号登录。不要安装 GitHub 自动生成的源码压缩包，也
 不要再安装 `dsh-custom-header` 或 `dsh-gpt-compat`。

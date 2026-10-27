@@ -16,6 +16,15 @@ const astra = {
   input_modalities: ["text", "image"],
   supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }, { effort: "max" }],
 };
+const terra = {
+  slug: "gpt-6.1-terra", display_name: "GPT-6.1-Terra", visibility: "list",
+  context_window: 500_000, max_context_window: 872_000,
+  input_modalities: ["text", "image"],
+  supported_reasoning_levels: [
+    { effort: "low" }, { effort: "medium" }, { effort: "high" },
+    { effort: "xhigh" }, { effort: "max" }, { effort: "ultra" },
+  ],
+};
 const directories: string[] = [];
 function cacheFile() {
   const directory = mkdtempSync(join(tmpdir(), "dsh-codex-models-"));
@@ -56,6 +65,31 @@ describe("Codex model discovery", () => {
       .toEqual(["gpt-future-model"]);
   });
 
+  it("merges GPT-6.1 Terra cache metadata without exposing the unsupported ultra effort", () => {
+    const filename = cacheFile();
+    vi.stubEnv("DSH_CODEX_MODELS_CACHE", filename);
+    writeCache(filename, [terra]);
+    const discovered = createOpenAICodexModelProvider()
+      .getModels()
+      .find((model) => model.id === "gpt-6.1-terra");
+
+    expect(discovered).toMatchObject({
+      contextWindow: 500_000,
+      maxTokens: 128_000,
+      input: ["text", "image"],
+      thinkingLevelMap: {
+        off: null,
+        minimal: "low",
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: "xhigh",
+        max: "max",
+      },
+    });
+    expect(Object.keys(discovered?.thinkingLevelMap ?? {})).not.toContain("ultra");
+  });
+
   it("ignores hidden, malformed, and duplicate entries and preserves known model prices", () => {
     const models = mergeOpenAICodexModels(bundled, { models: [
       null, { ...astra, slug: "hidden", visibility: "hide" },
@@ -88,6 +122,7 @@ describe("Codex model discovery", () => {
         "gpt-6-astra",
         "gpt-6-sol",
         "gpt-6-luna",
+        "gpt-6.1-terra",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-5.6-luna",
