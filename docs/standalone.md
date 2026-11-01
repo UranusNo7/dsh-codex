@@ -86,6 +86,33 @@
   当前 Client 已确认这两个渲染入口注册并生效（priority -1，对应 stock `priority 0` 未激活）；未做
   目视验收（Tabbit 不可用），不承诺一般 HMR。测试见
   `tests/native-compaction-presentation.client.spec.tsx`。
+- 当前源码另有 Agent 工具 `codex_context`（status/request_compaction/recall）：只作用于当前会话；
+  `request_compaction` 只受理并返回 queued 凭据，真正压缩在本轮结束后的 idle 边界执行，且仅当来源
+  turn 以 `completed` 结束才执行一次（来源取消或无法证明则不执行，后者受理时直接拒绝），自动阈值与
+  兜底保持不变。`recall` 有界读当前会话纯文本，不返回 system/developer 与 opaque 加密块。
+- 压缩诊断仅向插件自有 `storageDomain` KV 写少量元数据（无正文/无 token 字符串/无第二 history DB），
+  并经官方 Gateway 与 `sessionQuery` 可见性只读暴露；不 resume 冷 Agent、不声明 per-session
+  capability，持久化缺失或无法关联时诚实 `unknown`。详细说明见 `docs/compaction.md`，未发布。
+- 对话内展示（用户已见运行提示；字号调整后的视觉待确认）：`codex_context` 的 `request_compaction` 以公开
+  `tool.call.toolview` 工具卡显示 queued/running 与无 checkpoint 终局；completed 只显示简短结论，
+  成功详情仍复用既有压缩历史行；底栏仅移除 Codex 压缩 entry（Fast Mode/quota 保留）。新增
+  `src/client/CompactionTurnNotice.tsx` 注册公开 turnTail 提示（order 15），通过 rc5 公开
+  `turnDataSource` 订阅本 turn 工具结果，以真实 requestId 精确查询现有 RPC；queued 等待空闲后开始，
+  running 显示“正在压缩上下文，后续消息将排队等待”，terminal 消失，成功历史不变。槽位本身可用；
+  `unknown` 回归中复现两处作用域问题（缺 `typert` 注入时 `$mount` 失败、补注入后属性访问
+  `remote.codexCompaction` 仍失败），与截图现象一致，不作唯一因果断言；产品侧仅两行（`inject` 补
+  `typert`、读取改经 `ctx.get('remote.codexCompaction')`，`$mount` 以 `.call(ctx.remote, …)` 绑定
+  接收者）。新接线使用成员调用并返回 disposer，可选失败仅固定警告。
+  压缩期间新消息由 Harness 既有机制（core FIFO）排队，不新增队列，结束后按顺序继续。关联以工具
+  result 的 `requestId` 为键；`compactionId` 来自同一次请求运行期核心 `compaction/start` 产生并由
+  结果验证的标识；仅当持久记录保存成功且 link 完整时可恢复，否则 `unknown`。
+- 运行态边界：`pnpm run check` 通过（`49 files / 573 tests`，双 tsc 与 host/client build 成功）。新增覆盖：
+  UI 6 例、真实 slot 9 例、真实 client `$mount` 8 例、真 driver 13 例（含 held 进行中真实 query 可读并
+  正常结束）；自动化联合测试基于 rc1，rc5 已做源码对照，尚无 rc5 真机自动化 E2E。用户重启后的截图确实
+  看到运行提示“正在压缩上下文”与状态“运行中”，随后 `status` 对同一请求返回 `completed`——这证明提示
+  可见与完成，不据此单独称 native 或真实 FIFO；截图发生在字号缩小之前，字号缩小后的视觉待用户确认。
+  诊断 domain/key 与后端合同不符（本轮未改）：实际可能仅内存、重启后恢复不保证，核心会话历史不受影响。
+  不承诺普遍 HMR（无 `dev:web` watcher）；本次字号/客户端作用域修复未改 Host 产品/协议/依赖/profile；未发布。
 
 提权清理规则（失败即保留，fail-closed）：
 

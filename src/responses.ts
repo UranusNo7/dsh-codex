@@ -19,6 +19,12 @@ import {
   convertResponsesTools,
 } from '@earendil-works/pi-ai/api/openai-responses-shared'
 import type { ResponseApiPreferences } from './tool-policy.ts'
+import type {
+  CompactionDecision,
+  CompactionLocalEstimate,
+  CompactionProviderUsage,
+  CompactionReason,
+} from './compaction-types.ts'
 
 /** Responses endpoint used by the official Codex client, including V2 compaction. */
 export const OPENAI_CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
@@ -27,6 +33,11 @@ const CODEX_TOOL_CALL_PROVIDERS = new Set(['openai', 'openai-codex', 'opencode']
 const COMPACTION_MARKER_OPEN = '<dsh-openai-codex-compaction-4f5cf1b7-v1>'
 const COMPACTION_MARKER_CLOSE = '</dsh-openai-codex-compaction-4f5cf1b7-v1>'
 const NO_SESSION = '<no-session>'
+
+/** Durable marker delimiters, shared with diagnostics classification. */
+export const OPENAI_CODEX_NATIVE_MARKER_OPEN = COMPACTION_MARKER_OPEN
+/** Durable marker closing delimiter, shared with diagnostics classification. */
+export const OPENAI_CODEX_NATIVE_MARKER_CLOSE = COMPACTION_MARKER_CLOSE
 
 /**
  * Conservative token allowance for the Harness checkpoint framing that wraps
@@ -47,8 +58,8 @@ export type TokenEstimator = (text: string) => number | undefined
 
 /** One in-flight compaction stream, bound to the source text it will replace. */
 interface CompactionCall {
-  /** Conservative source lower bound in tokens, or undefined when unavailable. */
-  readonly budget: number | undefined
+  /** Conservative source lower bound, or undefined when unavailable. */
+  readonly sourceEstimate: CompactionLocalEstimate | undefined
 }
 
 type JsonRecord = Record<string, unknown>
@@ -61,6 +72,24 @@ interface CompactResponse {
 
 const MAX_NATIVE_COMPACTION_RETRIES = 2
 
+/**
+ * One response that arrived but violated the Codex compact wire protocol
+ * (missing item, truncated stream, malformed terminal). Distinguished from a
+ * transport/provider failure without matching any external error message.
+ */
+class NativeCompactionProtocolError extends Error {
+  readonly code = 'invalid-response'
+  constructor(message: string) {
+    super(message)
+    this.name = 'NativeCompactionProtocolError'
+  }
+}
+
+/** Whether a caught compaction failure is a local wire-protocol rejection. */
+function isNativeProtocolError(error: unknown): boolean {
+  return error instanceof NativeCompactionProtocolError
+}
+
 /** Whether an opaque value is a non-array record. */
 function isRecord(value: unknown): value is JsonRecord {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -70,6 +99,15 @@ function isRecord(value: unknown): value is JsonRecord {
 function usageNumber(record: JsonRecord | undefined, key: string): number {
   const value = record?.[key]
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+}
+
+/**
+ * Read a reported finite non-negative usage number, or undefined when the
+ * provider did not report it. Diagnostics never turn absence into zero.
+ */
+function reportedUsageNumber(record: JsonRecord | undefined, key: string): number | undefined {
+  const value = record?.[key]
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
 }
 
 function emptyUsage(): Usage {
@@ -270,7 +308,7 @@ function requestSignal(signal: AbortSignal | undefined, timeoutMs: number | unde
 
 /** Parse the V2 compaction item from a normal Responses SSE stream. */
 async function compactResponse(response: Response, retained: readonly unknown[]): Promise<CompactResponse> {
-  if (response.body === null) throw new Error('OpenAI Codex compact response had no body')
+  if (response.body === null) throw new NativeCompactionProtocolError('OpenAI Codex compact response had no body')
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -290,7 +328,7 @@ async function compactResponse(response: Response, retained: readonly unknown[])
     if (event['type'] === 'response.output_item.done') {
       const item = event['item']
       if (isRecord(item) && item['type'] === 'compaction') {
-        if (compaction !== undefined) throw new Error('OpenAI Codex compact response contained multiple compaction items')
+        if (compaction !== undefined) throw new NativeCompactionProtocolError('OpenAI Codex compact response contained multiple compaction items')
         compaction = item
       }
       return
@@ -300,12 +338,12 @@ async function compactResponse(response: Response, retained: readonly unknown[])
     }
     if (event['type'] !== 'response.completed' && event['type'] !== 'response.done') return
     const terminal = event['response']
-    if (!isRecord(terminal)) throw new Error('OpenAI Codex compact stream returned a malformed terminal event')
+    if (!isRecord(terminal)) throw new NativeCompactionProtocolError('OpenAI Codex compact stream returned a malformed terminal event')
     const id = terminal['id']
-    if (id !== undefined && typeof id !== 'string') throw new Error('OpenAI Codex returned a malformed compact response id')
+    if (id !== undefined && typeof id !== 'string') throw new NativeCompactionProtocolError('OpenAI Codex returned a malformed compact response id')
     responseId = id
     const rawUsage = terminal['usage']
-    if (rawUsage !== undefined && !isRecord(rawUsage)) throw new Error('OpenAI Codex returned malformed compact usage')
+    if (rawUsage !== undefined && !isRecord(rawUsage)) throw new NativeCompactionProtocolError('OpenAI Codex returned malformed compact usage')
     usage = rawUsage
     completed = true
   }
@@ -328,8 +366,8 @@ async function compactResponse(response: Response, retained: readonly unknown[])
   } finally {
     reader.releaseLock()
   }
-  if (!completed) throw new Error('OpenAI Codex compact stream ended before response.completed')
-  if (compaction === undefined) throw new Error('OpenAI Codex compact response did not contain a compaction item')
+  if (!completed) throw new NativeCompactionProtocolError('OpenAI Codex compact stream ended before response.completed')
+  if (compaction === undefined) throw new NativeCompactionProtocolError('OpenAI Codex compact response did not contain a compaction item')
   return {
     ...responseId === undefined ? {} : { id: responseId },
     output: [...retained, compaction],
@@ -351,7 +389,8 @@ export class OpenAICodexResponseRuntime {
   constructor(
     private readonly preferences: () => ResponseApiPreferences,
     private readonly requestFetch: FetchFunction = globalThis.fetch,
-    private readonly estimateText?: TokenEstimator
+    private readonly estimateText?: TokenEstimator,
+    private readonly onDecision?: (decision: CompactionDecision) => void
   ) {}
 
   /**
@@ -366,7 +405,7 @@ export class OpenAICodexResponseRuntime {
   enterCompaction(sessionId: string | undefined, sourceText?: string): () => void {
     const key = sessionKey(sessionId)
     const stack = this.compactionCalls.get(key) ?? []
-    const call: CompactionCall = { budget: this.sourceBudget(sourceText) }
+    const call: CompactionCall = { sourceEstimate: this.sourceEstimate(sourceText) }
     stack.push(call)
     this.compactionCalls.set(key, stack)
     return () => {
@@ -386,10 +425,12 @@ export class OpenAICodexResponseRuntime {
     }
   }
 
-  /** Conservative source budget in tokens, or undefined when it cannot be proven. */
-  private sourceBudget(sourceText: string | undefined): number | undefined {
+  /** Conservative source estimate in tokens, or undefined when it cannot be proven. */
+  private sourceEstimate(sourceText: string | undefined): CompactionLocalEstimate | undefined {
     if (sourceText === undefined || sourceText.length === 0) return undefined
-    return this.estimateTokens(sourceText)
+    const tokens = this.estimateTokens(sourceText)
+    if (tokens === undefined) return undefined
+    return { tokens, source: 'source-text', estimator: 'host-token-meter', at: Date.now() }
   }
 
   /** Run the injected estimator, treating absent or unusable answers as unknown. */
@@ -404,11 +445,42 @@ export class OpenAICodexResponseRuntime {
   }
 
   /** Whether the native checkpoint can be shown to shrink below its source. */
-  private canPublishCheckpoint(marker: string, budget: number | undefined): boolean {
-    if (budget === undefined) return false
-    const tokens = this.estimateTokens(marker)
-    if (tokens === undefined) return false
-    return tokens + OPENAI_CODEX_CHECKPOINT_FRAME_ALLOWANCE < budget
+  private markerTokens(marker: string): number | undefined {
+    return this.estimateTokens(marker)
+  }
+
+  /** Report one sanitized selection decision; diagnostics never disturb the stream. */
+  private decide(
+    sessionId: string | undefined,
+    reason: CompactionReason,
+    facts: {
+      sourceEstimate?: CompactionLocalEstimate
+      markerEstimate?: CompactionLocalEstimate
+      nativeUsage?: CompactionProviderUsage
+    } = {}
+  ): void {
+    const hook = this.onDecision
+    if (hook === undefined) return
+    try {
+      hook({
+        ...sessionId === undefined ? {} : { sessionId },
+        reason,
+        at: Date.now(),
+        ...facts.sourceEstimate === undefined ? {} : { sourceEstimate: facts.sourceEstimate },
+        ...facts.markerEstimate === undefined ? {} : { markerEstimate: facts.markerEstimate },
+        ...facts.nativeUsage === undefined ? {} : { nativeUsage: facts.nativeUsage },
+      })
+    } catch {
+      // A diagnostics consumer must never break the response or its abort path.
+    }
+  }
+
+  /** Marker size estimate for one candidate checkpoint text. */
+  private markerEstimate(marker: string): CompactionLocalEstimate | undefined {
+    const tokens = this.markerTokens(marker)
+    return tokens === undefined
+      ? undefined
+      : { tokens, source: 'marker', estimator: 'host-token-meter', at: Date.now() }
   }
 
   private streamSimple(
@@ -420,11 +492,21 @@ export class OpenAICodexResponseRuntime {
     const key = sessionKey(options?.sessionId)
     const compaction = this.compactionCalls.get(key)?.at(-1)
     const preferences = this.preferences()
-    if (compaction !== undefined && preferences.useNativeCompaction &&
-      compaction.budget !== undefined && compaction.budget > 0) {
-      return this.nativeCompactionStream(provider, model, context, options, compaction.budget)
+    if (compaction === undefined) {
+      return this.standardStream(provider, model, context, options, preferences.useWebSocketContextReuse)
     }
-    return this.standardStream(provider, model, context, options, compaction === undefined && preferences.useWebSocketContextReuse)
+    if (!preferences.useNativeCompaction) {
+      this.decide(options?.sessionId, 'native-disabled')
+      return this.standardStream(provider, model, context, options, false)
+    }
+    if (compaction.sourceEstimate === undefined || compaction.sourceEstimate.tokens <= 0) {
+      this.decide(
+        options?.sessionId,
+        this.estimateText === undefined ? 'no-estimator' : 'no-source-budget'
+      )
+      return this.standardStream(provider, model, context, options, false)
+    }
+    return this.nativeCompactionStream(provider, model, context, options, compaction)
   }
 
   private standardStream(
@@ -453,14 +535,14 @@ export class OpenAICodexResponseRuntime {
     model: Model<Api>,
     context: PiContext,
     options: SimpleStreamOptions | undefined,
-    budget: number,
+    compaction: CompactionCall,
   ): AssistantMessageEventStream {
     const target = createAssistantMessageEventStream()
     // One async owner: the source is chosen exactly once, and any selection or
     // iteration failure becomes one explicit terminal event.
     void (async () => {
       try {
-        const source = await this.chooseCompactionStream(provider, model, context, options, budget)
+        const source = await this.chooseCompactionStream(provider, model, context, options, compaction)
         for await (const event of source) target.push(event)
       } catch (error) {
         target.push({
@@ -473,27 +555,55 @@ export class OpenAICodexResponseRuntime {
     return target
   }
 
+  /**
+   * Record a real cancellation of this compaction call, then preserve the
+   * original abort semantics for the caller.
+   */
+  private abortNativeCompaction(
+    sessionId: string | undefined,
+    sourceEstimate: CompactionLocalEstimate | undefined,
+    signal: AbortSignal | undefined
+  ): void {
+    if (signal?.aborted !== true) return
+    // A real aborted signal is the only trustworthy cancellation source; the
+    // core error string on `compaction/end` is never used to infer one.
+    this.decide(sessionId, 'aborted', {
+      ...sourceEstimate === undefined ? {} : { sourceEstimate },
+    })
+    signal.throwIfAborted()
+  }
+
   /** Pick the native checkpoint or the ordinary summary, exactly once. */
   private async chooseCompactionStream(
     provider: Provider,
     model: Model<Api>,
     context: PiContext,
     options: SimpleStreamOptions | undefined,
-    budget: number,
+    compaction: CompactionCall,
   ): Promise<AssistantMessageEventStream> {
+    const sessionId = options?.sessionId
+    const sourceEstimate = compaction.sourceEstimate
     // Cancellation must propagate: this throw is turned into an aborted
     // terminal event by the owner, never into a fallback request.
-    options?.signal?.throwIfAborted()
+    this.abortNativeCompaction(sessionId, sourceEstimate, options?.signal)
     let response: CompactResponse | undefined
+    let requestError: unknown
     try {
       response = await this.requestNativeCompaction(model, context, options)
-    } catch {
+    } catch (error) {
       response = undefined
+      requestError = error
     }
-    options?.signal?.throwIfAborted()
+    this.abortNativeCompaction(sessionId, sourceEstimate, options?.signal)
     if (response === undefined) {
+      // A response that arrived but violated the compact wire protocol is a
+      // local, classified rejection; anything else is a request failure.
+      this.decide(sessionId, isNativeProtocolError(requestError) ? 'invalid-response' : 'native-request-failed', {
+        ...sourceEstimate === undefined ? {} : { sourceEstimate },
+      })
       return this.standardStream(provider, model, context, options, false)
     }
+    const nativeUsage = this.nativeRequestUsage(response.usage)
     let marker: string | undefined
     try {
       marker = nativeCompactionMarker(response.output)
@@ -501,10 +611,72 @@ export class OpenAICodexResponseRuntime {
       // A malformed checkpoint cannot be published; use the ordinary summary.
       marker = undefined
     }
-    if (marker !== undefined && this.canPublishCheckpoint(marker, budget)) {
-      return markerStream(model, response, marker)
+    if (marker === undefined) {
+      this.decide(sessionId, 'invalid-response', {
+        ...sourceEstimate === undefined ? {} : { sourceEstimate },
+        ...nativeUsage === undefined ? {} : { nativeUsage },
+      })
+      return this.standardStream(provider, model, context, options, false)
     }
-    return this.standardStream(provider, model, context, options, false)
+    const markerEstimate = this.markerEstimate(marker)
+    const fits =
+      markerEstimate !== undefined &&
+      sourceEstimate !== undefined &&
+      markerEstimate.tokens + OPENAI_CODEX_CHECKPOINT_FRAME_ALLOWANCE < sourceEstimate.tokens
+    if (!fits) {
+      this.decide(sessionId, 'not-smaller', {
+        ...sourceEstimate === undefined ? {} : { sourceEstimate },
+        ...markerEstimate === undefined ? {} : { markerEstimate },
+        ...nativeUsage === undefined ? {} : { nativeUsage },
+      })
+      return this.standardStream(provider, model, context, options, false)
+    }
+    this.decide(sessionId, 'selected-native', {
+      ...sourceEstimate === undefined ? {} : { sourceEstimate },
+      markerEstimate,
+      ...nativeUsage === undefined ? {} : { nativeUsage },
+    })
+    return markerStream(model, response, marker)
+  }
+
+  /**
+   * Provider usage of one completed native compaction request, never an
+   * estimate. Only values the provider actually reported are kept: an absent
+   * column is omitted (never reported as zero), and a response carrying no
+   * usable usage column yields no group at all.
+   *
+   * `input_tokens` is normalized to the frozen Harness non-cached shape by
+   * subtracting the cache columns the provider reported; an unreported cache
+   * column is not invented.
+   */
+  private nativeRequestUsage(raw: JsonRecord | undefined): CompactionProviderUsage | undefined {
+    if (raw === undefined) return undefined
+    const inputDetails = isRecord(raw['input_tokens_details']) ? raw['input_tokens_details'] : undefined
+    const reportedInput = reportedUsageNumber(raw, 'input_tokens')
+    const cacheReadTokens = reportedUsageNumber(inputDetails, 'cached_tokens')
+    const cacheWriteTokens = reportedUsageNumber(inputDetails, 'cache_write_tokens')
+    const outputTokens = reportedUsageNumber(raw, 'output_tokens')
+    const totalTokens = reportedUsageNumber(raw, 'total_tokens')
+    if (
+      reportedInput === undefined &&
+      outputTokens === undefined &&
+      cacheReadTokens === undefined &&
+      cacheWriteTokens === undefined &&
+      totalTokens === undefined
+    ) {
+      return undefined
+    }
+    return {
+      ...reportedInput === undefined
+        ? {}
+        : { inputTokens: Math.max(0, reportedInput - (cacheReadTokens ?? 0) - (cacheWriteTokens ?? 0)) },
+      ...outputTokens === undefined ? {} : { outputTokens },
+      ...cacheReadTokens === undefined ? {} : { cacheReadTokens },
+      ...cacheWriteTokens === undefined ? {} : { cacheWriteTokens },
+      ...totalTokens === undefined ? {} : { totalTokens },
+      source: 'native-request',
+      at: Date.now(),
+    }
   }
 
   private async requestNativeCompaction(

@@ -1,9 +1,12 @@
 // @vitest-environment jsdom
 
+import { cleanup, render, waitFor } from '@testing-library/react'
 import { createElement, memo } from 'react'
 import type { ComponentType, ReactElement, ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
+import type { CompactionDiagnosticsSnapshot } from '../src/compaction-types.ts'
+import { compactionFactFor } from '../src/client/CompactionStatus.tsx'
 import {
   installNativeCompactionPresentation,
   isNativeCompactionSummary,
@@ -13,6 +16,7 @@ import {
 const MARKER_OPEN = '<dsh-openai-codex-compaction-4f5cf1b7-v1>'
 const MARKER_CLOSE = '</dsh-openai-codex-compaction-4f5cf1b7-v1>'
 const LABEL = '已使用Codex远程压缩'
+afterEach(cleanup)
 
 function nativeMarker(extra = ''): string {
   const output = [
@@ -105,8 +109,12 @@ class FakeSlots {
   }
 }
 
-function install(fake: FakeSlots, label: string | (() => string)): () => void {
-  return installNativeCompactionPresentation(fake as never, label)
+function install(
+  fake: FakeSlots,
+  label: string | (() => string),
+  options?: Parameters<typeof installNativeCompactionPresentation>[2]
+): () => void {
+  return installNativeCompactionPresentation(fake as never, label, options)
 }
 
 function wrapperFor(fake: FakeSlots, key: string): RegisteredEntry {
@@ -403,3 +411,190 @@ describe('native compaction presentation registration', () => {
 // Keep a compile-time check that stock components stay React-recognizable.
 const _memoType: ComponentType<Record<string, unknown>> = memo(() => null)
 void _memoType
+
+function diagnosticSnapshot(status: 'native' | 'ordinary'): CompactionDiagnosticsSnapshot {
+  return {
+    v: 1,
+    persistent: true,
+    facts: [{
+      compactionId: 'cmp-1',
+      status,
+      startSeq: 1,
+      summarySeq: 2,
+      checkpointSeq: 3,
+      endSeq: 4,
+      turn: 1,
+    }],
+    records: [{
+      compactionId: 'cmp-1',
+      at: 1,
+      decision: status === 'native' ? 'selected-native' : 'native-request-failed',
+    }],
+    session: { state: 'unknown', owner: { state: 'unknown', evidence: [] }, at: 1 },
+  }
+}
+
+describe('native compaction diagnostics wiring', () => {
+  it('labels an exact ordinary fallback without replacing its summary', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const fake = new FakeSlots()
+    fake.rawEntries.push({
+      component: (props: Record<string, unknown>) => {
+        seen.push(props)
+        return createElement('div', null, 'stock')
+      },
+      options: { key: 'compaction' },
+      locale: 'chat',
+    })
+    const diagnostics = diagnosticSnapshot('ordinary')
+    expect(diagnostics.facts[0]?.status).toBe('ordinary')
+    expect(compactionFactFor(diagnostics, 3, 2)?.status).toBe('ordinary')
+    const dispose = install(fake, LABEL, {
+      reader: { read: async () => diagnostics },
+      t: (key, params) => key === 'compactionHistoryFallback'
+        ? `fallback:${String(params?.['reason'])}`
+        : key,
+    })
+    const chatT = (key: string) => `chat:${key}`
+    const node = {
+      kind: 'compaction',
+      seq: 3,
+      data: { seq: 3, summaryEventSeq: 2, summary: 'ordinary summary' },
+    }
+    render(createElement(wrapperFor(fake, 'compaction').component, {
+      node,
+      t: chatT,
+      compactionDiagnostics: () => Promise.resolve(diagnostics),
+    }))
+
+    await waitFor(() => {
+      const t = seen.at(-1)?.['t'] as ((key: string) => string) | undefined
+      expect(t?.('message.compaction')).toBe('fallback:compactionReasonNativeRequestFailed')
+    })
+    const props = seen.at(-1)
+    const summary = (props?.['node'] as { data: { summary: string } }).data.summary
+    expect(summary).toContain('fallback:compactionReasonNativeRequestFailed')
+    expect(summary).toContain('ordinary summary')
+    expect(node.data.summary).toBe('ordinary summary')
+    dispose()
+  })
+
+  it('keeps ordinary summary text after bounded diagnostics in history details', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const fake = new FakeSlots()
+    fake.rawEntries.push({
+      component: (props: Record<string, unknown>) => {
+        seen.push(props)
+        return createElement('div', null, 'stock')
+      },
+      options: { key: 'compaction' },
+      locale: 'chat',
+    })
+    const base = diagnosticSnapshot('ordinary')
+    const diagnostics: CompactionDiagnosticsSnapshot = {
+      ...base,
+      records: [{
+        ...base.records[0]!,
+        sourceEstimate: {
+          tokens: 500, source: 'source-text', estimator: 'host-token-meter', at: 1,
+        },
+        nativeUsage: { inputTokens: 10, totalTokens: 15, source: 'native-request', at: 1 },
+      }],
+    }
+    const dispose = install(fake, LABEL, {
+      reader: { read: async () => diagnostics },
+      t: key => key,
+    })
+    const node = {
+      kind: 'compaction',
+      seq: 3,
+      data: { seq: 3, summaryEventSeq: 2, summary: 'ordinary summary' },
+    }
+    render(createElement(wrapperFor(fake, 'compaction').component, {
+      node,
+      compactionDiagnostics: () => Promise.resolve(diagnostics),
+    }))
+
+    await waitFor(() => {
+      const summary = (seen.at(-1)?.['node'] as { data: { summary: string } }).data.summary
+      expect(summary).toContain('compactionSourceEstimate: 500 compactionTokens')
+      expect(summary).toContain('compactionNativeUsage: compactionUsageInput 10 · compactionUsageTotal 15')
+      expect(summary).toContain('ordinary summary')
+    })
+    dispose()
+  })
+
+  it('labels a native fact from pure projection when diagnostics are unavailable', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const fake = new FakeSlots()
+    fake.rawEntries.push({
+      component: (props: Record<string, unknown>) => {
+        seen.push(props)
+        return createElement('div', null, 'stock')
+      },
+      options: { key: 'compaction' },
+      locale: 'chat',
+    })
+    const dispose = install(fake, LABEL, {
+      reader: { read: async () => { throw new Error('unavailable') } },
+    })
+    const projection = {
+      v: 1,
+      activitySeq: 1,
+      facts: [{
+        compactionId: 'cmp-1',
+        status: 'native',
+        startSeq: 1,
+        summarySeq: 2,
+        checkpointSeq: 3,
+        endSeq: 4,
+        turn: 1,
+      }],
+    }
+    const node = {
+      kind: 'compaction',
+      seq: 3,
+      data: { seq: 3, summaryEventSeq: 2, summary: nativeMarker() },
+    }
+    render(createElement(wrapperFor(fake, 'compaction').component, {
+      node,
+      useProjection: () => projection,
+      compactionDiagnostics: () => Promise.reject(new Error('unavailable')),
+    }))
+
+    await waitFor(() => {
+      expect((seen.at(-1)?.['node'] as { data: { summary: string } }).data.summary).toBe(LABEL)
+    })
+    dispose()
+  })
+
+  it('labels a native fact and replaces only the opaque marker summary', async () => {
+    const seen: Array<Record<string, unknown>> = []
+    const fake = new FakeSlots()
+    fake.rawEntries.push({
+      component: (props: Record<string, unknown>) => {
+        seen.push(props)
+        return createElement('div', null, 'stock')
+      },
+      options: { key: 'compaction' },
+      locale: 'chat',
+    })
+    const diagnostics = diagnosticSnapshot('native')
+    const dispose = install(fake, LABEL, { reader: { read: async () => diagnostics } })
+    const node = {
+      kind: 'compaction',
+      seq: 3,
+      data: { seq: 3, summaryEventSeq: 2, summary: nativeMarker() },
+    }
+    render(createElement(wrapperFor(fake, 'compaction').component, {
+      node,
+      compactionDiagnostics: () => Promise.resolve(diagnostics),
+    }))
+
+    await waitFor(() => expect(seen.length).toBeGreaterThan(0))
+    const props = seen.at(-1)
+    expect((props?.['node'] as { data: { summary: string } }).data.summary).toBe(LABEL)
+    expect((node.data.summary)).toBe(nativeMarker())
+    dispose()
+  })
+})

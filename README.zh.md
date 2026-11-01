@@ -211,6 +211,10 @@ dsh-codex 0.3.0 不再写入已停用的 `web/openai-codex-search-llm-request` �
 
 聊天历史里的原生检查点只显示「已使用Codex远程压缩」标签，不展开或展示其加密正文；普通摘要、以及缺少完整原生标记的历史仍按原样显示。该行为只作用于展示层：持久检查点、旧日志与请求 payload 均不改变。
 
+当前源码还提供 `codex_context` 工具（`status` / `request_compaction` / `recall`）：只作用于当前会话；`request_compaction` 只受理并返回 `queued` 凭据，真正压缩在本轮结束后的 idle 边界执行，`queued` 不等于成功，来源 turn 被取消则不执行，自动阈值与兜底路径保持不变。`recall` 只读有界纯文本，不返回 system/developer 隐藏提示与 opaque 加密块。压缩诊断仅写入少量元数据（无正文、无凭据 token——数值 token 计数会保存；无第二份历史库），并经官方 Gateway 与 `sessionQuery` 可见性只读暴露。详见 [docs/compaction.md](docs/compaction.md)。该能力仅存在于当前源码，未发布。
+
+当前源码提供对话内压缩请求卡和独立运行提示：queued 表示等待会话空闲，running 提示“正在压缩上下文，后续消息将排队等待”；提示不受工具组折叠影响，终局后消失，成功详情仍看原压缩历史行。排队由 Harness 既有机制处理；底栏只移除 Codex 压缩入口，Fast Mode 与额度指示保留。自动测试已通过（`pnpm run check`，49 files / 573 tests，含双 tsc 与 host/client build）；用户重启后的截图确实看到运行提示与“运行中”，随后 `status` 对同一请求返回 `completed`，这证明提示与完成，但不据此单独声称 native 或真实 FIFO。截图发生在字号缩小之前，字号缩小后的视觉效果仍待确认。不承诺普遍 HMR，未发布。
+
 ## 凭据与隐私
 
 dsh 登录默认与 Codex CLI／Desktop 相互独立：

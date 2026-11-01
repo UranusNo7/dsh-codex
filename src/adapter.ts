@@ -29,7 +29,8 @@ import type {
 import type { OpenAICodexCredentialStore } from "./store.ts";
 import { OPENAI_CODEX_PROVIDER } from "./store.ts";
 import { OpenAICodexResponseRuntime } from "./responses.ts";
-import type { TokenEstimator } from "./responses.ts";
+import type { TokenEstimator } from "./responses.ts"
+import type { CompactionDecision } from "./compaction-types.ts";
 import type {
   ModelCatalogEntry,
   ResponseApiPreferences,
@@ -687,7 +688,8 @@ export function createOpenAICodexAdapter(
   requestFetch?: FetchFunction,
   fastModeDefault?: () => boolean,
   modelProvider: Provider = createOpenAICodexModelProvider(),
-  estimateText?: TokenEstimator
+  estimateText?: TokenEstimator,
+  onCompactionDecision?: (decision: CompactionDecision) => void
 ): PiAiAdapter {
   const provider = requestProvider(
     modelProvider,
@@ -698,7 +700,8 @@ export function createOpenAICodexAdapter(
   const responses = new OpenAICodexResponseRuntime(
     responsePreferences,
     requestFetch,
-    estimateText
+    estimateText,
+    onCompactionDecision
   );
   const unset = Symbol("unset context window");
   let resolvedContextWindow: number | null | undefined | typeof unset = unset;

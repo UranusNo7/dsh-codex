@@ -102,6 +102,20 @@ import {
 import type { OpenAICodexImageModel } from "./image-model.ts";
 import { apply as applyNetworkProxy } from "./net-proxy/index.js";
 import { localNetworkProxyTool } from "./local-network-proxy-tool.ts";
+import {
+  CodexContextController,
+  takeoverDeclared,
+} from "./codex-context.ts";
+import type {
+  CodexCompactionService,
+  TurnBoundaryLike,
+} from "./codex-context.ts";
+import { installCodexContextTools } from "./codex-context-tool.ts";
+import {
+  installCompactionDiagnostics,
+  openCompactionIdOfState,
+} from "./compaction-diagnostics.ts";
+import { COMPACTION_PROJECTION_KEY } from "./compaction-types.ts";
 
 export { OpenAICodexService } from "./service.ts";
 export type { OpenAICodexServiceOptions } from "./service.ts";
@@ -158,6 +172,37 @@ export {
 export { OPENAI_CODEX_LUNA_RESERVE_MODEL } from "./adapter.ts";
 export { OPENAI_CODEX_CHECKPOINT_FRAME_ALLOWANCE } from "./responses.ts";
 export type { TokenEstimator } from "./responses.ts";
+export {
+  COMPACTION_DIAGNOSTICS_VERSION,
+  COMPACTION_PROJECTION_KEY,
+  COMPACTION_PROJECTION_STATE_VERSION,
+  COMPACTION_REMOTE_NAMESPACE,
+} from "./compaction-types.ts";
+export type {
+  CompactionDecision,
+  CompactionDiagnostic,
+  CompactionDiagnosticsSnapshot,
+  CompactionLocalEstimate,
+  CompactionOutcomeStatus,
+  CompactionOwnerStatus,
+  CompactionProjectionFact,
+  CompactionProjectionView,
+  CompactionProviderUsage,
+  CompactionReadRequest,
+  CompactionReason,
+  CompactionSessionStatus,
+  CompactionSummaryFacts,
+} from "./compaction-types.ts";
+export {
+  COMPACTION_DOMAIN_NAME,
+  COMPACTION_DOMAIN_TABLE,
+  CompactionDiagnostics,
+  CompactionRemote,
+  foldCompactionEvents,
+  installCompactionDiagnostics,
+  openCompactionId,
+  openCompactionIdOfState,
+} from "./compaction-diagnostics.ts";
 
 export {
   loginOpenAICodex,
@@ -343,6 +388,180 @@ export function apply(ctx: Context, config: Config): void {
       })
     );
   };
+  // Diagnostics metadata plus the pure projection and readonly Remote. The
+  // decision hook resolves the real compaction id from the live session's
+  // projection state, never from timing or a hash guess.
+  let contextController: CodexContextController | undefined;
+  const { diagnostics, dispose: disposeDiagnostics } =
+    installCompactionDiagnostics(ctx, {
+      resolveCompactionId: (sessionId) => {
+        const sessions = (ctx as unknown as { get(name: string): unknown }).get(
+          "sessions"
+        ) as { get(id: string): unknown } | undefined;
+        const projections = (ctx as unknown as {
+          get(name: string): unknown;
+        }).get("sessionProjections") as
+          | { stateOf(session: unknown, key: string): unknown }
+          | undefined;
+        const session = sessions?.get(sessionId);
+        if (session === undefined || projections === undefined) return undefined;
+        return openCompactionIdOfState(
+          projections.stateOf(session, COMPACTION_PROJECTION_KEY)
+        );
+      },
+      sessionStatus: (sessionId) =>
+        contextController?.statusForSession(sessionId),
+      // Exact per-request status is read from the controller's bounded facts;
+      // the settle port only waits inside the observed idle→settle window.
+      requests: (sessionId) => contextController?.requestsForSession(sessionId),
+      settleRequests: (sessionId, signal) =>
+        contextController?.settleForRead(sessionId, signal),
+    });
+  // Agent-scoped compaction requests/recovery: the controller owns the queue and
+  // the factual owner verdict; this plugin only reports and never takes over an
+  // external compaction gate. A composed gate is not a takeover: only an active
+  // external declaration blocks the request path.
+  const agentPresets = () =>
+    (ctx as unknown as {
+      get(name: string): unknown;
+    }).get("agentPresets") as
+      | {
+          serviceFor(
+            agent: unknown,
+            key: string
+          ): CodexCompactionService | undefined;
+        }
+      | undefined;
+  contextController = new CodexContextController({
+    resolveCompaction: (agent) => {
+      const presets = agentPresets()?.serviceFor(agent, "compaction");
+      if (presets !== undefined) return presets;
+      // A composition may inherit `compaction` through the Agent's own scope
+      // without mounting agentPresets; read that scope, never the root context.
+      const scoped = (agent as unknown as {
+        ctx?: { get(name: string): unknown };
+      }).ctx;
+      return scoped?.get("compaction") as CodexCompactionService | undefined;
+    },
+    takeoverDeclared: () => takeoverDeclared(),
+    // The public `turnBoundary` projection is the preferred source of the
+    // accepted turn; the controller itself converts the projection's
+    // `openTurnStartSeq` into a turn number from the durable event. The
+    // callback must hand back the boundary object, never a bare seq.
+    resolveSourceTurn: (agent) => {
+      const session = agent.session;
+      const projections = (ctx as unknown as {
+        get(name: string): unknown;
+      }).get("sessionProjections") as
+        | { stateOf(session: unknown, key: string): unknown }
+        | undefined;
+      if (session === undefined || projections === undefined) return undefined;
+      const boundary = projections.stateOf(session, "turnBoundary");
+      return typeof boundary === "object" && boundary !== null
+        ? (boundary as TurnBoundaryLike)
+        : undefined;
+    },
+    diagnostics: (agent) => {
+      const sessionId = agent.session?.id;
+      if (sessionId === undefined) return undefined;
+      const latest = diagnostics.latest(sessionId);
+      if (latest === undefined) return undefined;
+      return {
+        ...(latest.sourceEstimate === undefined
+          ? {}
+          : { localEstimate: latest.sourceEstimate }),
+        ...(latest.nativeUsage === undefined
+          ? {}
+          : { providerUsage: latest.nativeUsage }),
+      };
+    },
+    onRequestChange: (sessionId, change) => {
+      // Persist the real request linkage only when the controller knows the
+      // compaction id; a queued phase contributes the real acceptance time.
+      if (change.compactionId !== undefined || change.phase === "queued") {
+        diagnostics.linkRequest(sessionId, {
+          requestId: change.requestId,
+          ...(change.compactionId === undefined
+            ? {}
+            : { compactionId: change.compactionId }),
+          ...(change.phase === "queued" ? { queuedAt: change.at } : {}),
+        });
+      }
+      if (change.phase !== "cancelled") return;
+      diagnostics.recordDecision({
+        sessionId,
+        ...(change.compactionId === undefined
+          ? {}
+          : { compactionId: change.compactionId }),
+        reason: "aborted",
+        at: change.at,
+      });
+    },
+    // The Agent identity is the only history address: the controller passes the
+    // calling Agent, and this Host port authorizes and observes exactly that
+    // current session through the public async query, disposing the lease.
+    readHistory: async (agent, range, signal) => {
+      const sessionId = agent.session?.id;
+      const sessionQuery = (ctx as unknown as {
+        get(name: string): unknown;
+      }).get("sessionQuery") as
+        | {
+            observeSession(
+              id: string,
+              options: { projectionMode: "none"; signal?: AbortSignal }
+            ): Promise<{
+              events?: readonly { seq: number; type: string; data?: unknown }[];
+              cursor?: number;
+              [Symbol.dispose]?: () => void;
+            }>;
+          }
+        | undefined;
+      if (sessionId === undefined || sessionQuery === undefined) return undefined;
+      const observation = await sessionQuery.observeSession(sessionId, {
+        projectionMode: "none",
+        ...(signal === undefined ? {} : { signal }),
+      });
+      try {
+        const all = observation.events ?? [];
+        return {
+          events: all.filter(
+            (event) =>
+              event.seq >= range.fromSeq && event.seq < range.toSeqExclusive
+          ),
+          // Derived from the complete observation, never from the filtered
+          // window: `endSeq` is one past the last durable seq of this session.
+          endSeq: all.reduce((max, event) => Math.max(max, event.seq + 1), 0),
+        };
+      } finally {
+        observation[Symbol.dispose]?.();
+      }
+    },
+  });
+  const disposeContextEvents = contextController.attach(
+    ctx as unknown as Parameters<CodexContextController["attach"]>[0]
+  );
+  let disposeContextTools: (() => void) | undefined;
+  // Optional capability: only the Agent roster is a prerequisite here. The tool
+  // itself is registered in the Agent's own `ctx.tools` (preset-local), so a
+  // composition with only a root `agents` service still installs correctly.
+  ctx.inject(["agents"], (contextCtx) => {
+    disposeContextTools = installCodexContextTools(
+      contextCtx as unknown as Parameters<typeof installCodexContextTools>[0],
+      contextController!
+    );
+  });
+  // One ordered async teardown: stop tool/listener registrations, abort and
+  // await in-flight maintenance, then flush and close diagnostics storage.
+  ctx.effect(
+    () => async () => {
+      disposeContextTools?.();
+      disposeContextTools = undefined;
+      disposeContextEvents();
+      await contextController?.dispose();
+      await disposeDiagnostics();
+    },
+    "dsh-openai-codex: compaction context lifecycle"
+  );
   assertNoOpenAICodexProviderConflict(
     ctx.llm.listProviders().map((provider) => provider.id)
   );
@@ -371,7 +590,8 @@ export function apply(ctx: Context, config: Config): void {
       service.proxy.fetch,
       () => imageTools.fastModeSnapshot().fastModeDefault,
       modelProvider,
-      estimateCompactionText
+      estimateCompactionText,
+      (decision) => diagnostics.recordDecision(decision)
     )
   );
   ctx.effect(

@@ -24,6 +24,13 @@ import type { OpenAICodexFastModeToggleInjected } from './OpenAICodexFastModeTog
 import { OpenAICodexQuotaIndicator } from './OpenAICodexQuotaIndicator.tsx'
 import type { OpenAICodexQuotaIndicatorInjected } from './OpenAICodexQuotaIndicator.tsx'
 import { installNativeCompactionPresentation } from './NativeCompactionPresentation.tsx'
+import { CodexContextToolView } from './CodexContextToolView.tsx'
+import { installCompactionTurnNotice } from './CompactionTurnNotice.tsx'
+import {
+  createCompactionDiagnosticsReader,
+  createCompactionRemoteContribution,
+  type CompactionRemote,
+} from './CompactionStatus.tsx'
 import { en, zh } from './locales.ts'
 import type { OpenAICodexSettingsKey } from './locales.ts'
 
@@ -37,17 +44,54 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 /** Stable browser-plugin name. */
 export const name = 'dsh-codex-client'
 /** Client services required by the settings contribution. */
-export const inject = ['slots', 'locale', 'sessions', 'remote', 'remote.session']
+export const inject = ['slots', 'locale', 'sessions', 'remote', 'remote.session', 'typert']
 
 /** Register account copy and the OpenAI Codex settings page. */
 export function apply(ctx: ClientContext): void {
   const namespace = 'settings.openai-codex'
   ctx.effect(() => ctx.locale.register(namespace, { zh, en }), 'dsh-openai-codex: settings copy')
   const t = ctx.locale.bind(namespace) as OpenAICodexSettingsInjected['t']
+  let markRemoteReady: (ready: boolean) => void = () => undefined
+  const remoteReady = new Promise<boolean>(resolve => {
+    markRemoteReady = resolve
+  })
+  const diagnostics = createCompactionDiagnosticsReader(
+    () => ctx.get('remote.codexCompaction') as CompactionRemote | undefined,
+    remoteReady
+  )
+  ctx.effect(() => {
+    let cancelled = false
+    let dispose: (() => Promise<void>) | undefined
+    const mount = (ctx.remote as unknown as {
+      $mount(contribution: unknown): Promise<() => Promise<void>>
+    }).$mount
+    void (async () => {
+      try {
+        const mounted = await mount.call(ctx.remote, createCompactionRemoteContribution())
+        if (cancelled) {
+          await mounted()
+          markRemoteReady(false)
+          return
+        }
+        dispose = mounted
+        markRemoteReady(true)
+      } catch {
+        markRemoteReady(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+      if (dispose !== undefined) void dispose()
+    }
+  }, 'dsh-openai-codex: compaction diagnostics remote')
   ctx.effect(
     () => installNativeCompactionPresentation(
       ctx.slots as unknown as Parameters<typeof installNativeCompactionPresentation>[0],
-      () => t('nativeCompactionLabel')
+      () => t('nativeCompactionLabel'),
+      {
+        reader: diagnostics,
+        t: (key, params) => t(key as OpenAICodexSettingsKey, params),
+      }
     ),
     'dsh-openai-codex: native compaction presentation'
   )
@@ -99,6 +143,17 @@ export function apply(ctx: ClientContext): void {
       t,
     }),
   }, ImagegenToolView))
+  ctx.slots.inject('tool.call.toolview', () => ctx.slots.register({
+    name: 'tool.call.toolview',
+    key: 'codex_context',
+    locale: namespace,
+    inject: (sessionId: SessionId) => ({ sessionId, t, diagnostics }),
+  }, CodexContextToolView as never))
+  ctx.effect(() => installCompactionTurnNotice(
+    ctx as unknown as Parameters<typeof installCompactionTurnNotice>[0],
+    diagnostics,
+    (key, params) => t(key as OpenAICodexSettingsKey, params)
+  ), 'dsh-codex: optional compaction turn notice')
   ctx.inject(['slots', 'modelDirectories', 'remote', 'remote.session'], scope => {
     scope.slots.inject('conversation.input.right', () => scope.slots.register({
       name: 'conversation.input.right',

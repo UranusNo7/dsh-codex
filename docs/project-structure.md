@@ -116,3 +116,65 @@
 - 仅展示层：持久检查点、旧日志与请求 payload 均不改变；不新增 hard deps（`entries()` 为公开
   Slot 服务方法，`component: unknown` 属 render-erased，故保留拒遮蔽的安全闸门）。仅存在于当前源码，
   未发布。
+
+## 压缩诊断与 codex_context（本轮源码，未发布）
+
+- `src/codex-context.ts`：Agent 侧控制器。`owner` 以 Agent 作用域 compaction 服务与进程级外部声明
+  判四态；`requestCompaction` 只受理并返回 queued ticket，绑定来源 turn（只用 `turnBoundary` 投影：
+  `openTurnStartSeq` 非 null 时取 `lastTurn` 为逻辑 turn；缺失/未打开则受理时
+  `refused('source-turn')`，不扫旧日志）；执行由公开
+  `agent/status` idle 驱动，仅当来源 `turn/end` 为 `completed` 才执行一次；同 session 去重、冷却
+  （默认 60s）、dispose 为 async 并 await 在飞 maintenance；receipt 用可注入随机 id。
+  `recall` 经 Host 注入的只读 `readHistory` 端口有界读取当前 Agent 会话（默认 20/上限 50、
+  16KB、2000 events、`nextFromSeq`；index 用公开 `sessionQuery.observeSession` 授权观察并释放，
+  缺失/失败 → `history-unavailable`），仅 user/
+  assistant/tool 文本，排除 system/developer 与整块 v1 marker；有 query 时返回命中窗口
+  （`charOffset`/`totalChars`）。`statusForSession` 投影为共享 `CompactionSessionStatus`。
+- `src/codex-context-tool.ts`：单一 `codex_context` 工具（status / request_compaction / recall），
+  按 Agent 作用域安装且仅对 `openai-codex` 路由暴露；在 `agent/request` 与 `request/header` 边界重挂，
+  provider 切换首轮可能仍展示 schema 但 execute 一律拒绝；prompt 仅一条短指引（不重复 schema）。
+- `src/compaction-types.ts`：Host/Remote/Client 共享契约（owner 状态、reason 固定词表、
+  `CompactionSessionStatus`、Remote 请求/快照 schema）。
+- `src/compaction-diagnostics.ts`：纯投影 `openaiCodex.compaction`、插件自有 `storageDomain` KV
+  （仅少量元数据，键 `<sessionId>/<compactionId>`；无正文/无 token/无第二 history DB，缺失时仅内存；
+  当前后端 domain/key 合同与该约定不符，实际可能仅内存，见文末限制）
+  与只读 Typert Remote `codexCompaction/read`（沿官方 Gateway/profile + Connection、endpoint 权限、
+  `sessionQuery` 可见性；不 resume 冷 Agent、不声明 per-session capability）。
+- `src/client/CompactionStatus.tsx`：只读诊断读取/标签工具（`createCompactionDiagnosticsReader`、
+  reason 标签、估算/usage 行），供工具卡与历史行共用；**底栏 Codex 压缩 entry 已移除**，Fast Mode
+  与 quota 指示保留；不改持久检查点与请求 payload。
+- `src/client/CompactionTurnNotice.tsx`：独立的公开 turnTail 提示（`openai-codex-compaction-turn`，
+  order 15），订阅 rc5 公开 `turnDataSource` 的本 turn 工具结果，以真实 requestId 精确查询现有 RPC；
+  queued 提示空闲后开始，running 显示“正在压缩上下文，后续消息将排队等待”，terminal 消失，成功
+  历史不变。`src/client/index.tsx` 用成员形式调用 `slots.inject/register` 并返回 disposer；可选注册
+  失败仅固定警告，不阻断启动。槽位本身可用；`unknown` 回归中复现的是两处作用域问题（缺 `typert`
+  注入时 `$mount` 即失败、补注入后以属性访问 `remote.codexCompaction` 仍失败），与截图现象一致，
+  不作唯一因果断言。产品侧仅两行：`inject` 声明补 `typert`、读取改经
+  `ctx.get('remote.codexCompaction')`；`$mount` 以 `.call(ctx.remote, …)` 绑定接收者调用。
+- `src/client/CodexContextToolView.tsx`：公开 `tool.call.toolview` 的 `key: "codex_context"` 工具卡；
+  queued/running 文案保持准确，仅同 `compactionId` 的 `selected-native` 证据才称远程。
+  压缩期间新消息由 Harness 既有机制（core FIFO）排队，不新增队列。请求卡 queued（已受理未开始）、
+  running、无 checkpoint 终局（noop/busy/拒绝/失败/取消）；completed 只显示简短结论，详情仍复用既有
+  压缩历史行。`requestId` 取自本工具 result，`snapshot.requests` 按 phase+result 精确 join；只有持久
+  记录成功保存且携带真实 link 时才能按 `requestId`+`compactionId` 恢复，否则一律 `unknown`（不按时间
+  或邻近猜测）。`status`/`recall` 结果独立可折叠。
+- `src/index.ts`（由 diagnostics owner 接线）：组合 projection、Domain KV、Remote、controller、tool
+  与可选 `resolveSourceTurn`；不新增 session 事件、不写全局 rule/preset。
+- 测试：`tests/codex-context.spec.ts`、`tests/codex-context-tool.spec.ts`、
+  `tests/codex-context-install.spec.ts`、`tests/compaction-core-integration.spec.ts`、
+  `tests/compaction-diagnostics.spec.ts`、`tests/compaction-driver-integration.spec.ts`、
+  `tests/compaction-gateway.spec.ts`（真实 TypertRegistry/Gateway）、
+  `tests/compaction-status.client.spec.tsx`、`tests/codex-context-toolview.client.spec.tsx` 等。
+- 本轮新增测试：`tests/compaction-turn-notice.client.spec.tsx`（UI 6 例）、
+  `tests/compaction-notice-registration.client.spec.tsx`（真实 renderer/SlotRegistry/Cordis 9 例）、
+  `tests/compaction-remote-mount.client.spec.tsx`（真实 client `$mount`/产品 reader 8 例，含两条旧作用域
+  失败复现）；`tests/compaction-driver-integration.spec.ts` 13 例（含 held 进行中真实 query 仍可读并
+  正常结束）。运行时为 rc1；rc5 已做源码对照，尚无 rc5 真机自动化 E2E。
+- 边界：`pnpm run check` 通过（`49 files / 573 tests`，双 tsc 与 host/client build 成功）。新增覆盖：
+  UI 6 例、真实 slot 9 例、真实 client `$mount` 8 例（含两条旧作用域失败复现）、driver 13 例（含 held
+  进行中 query 可读并结束）；自动化联合测试基于 rc1，rc5 已做源码对照，尚无 rc5 真机自动化 E2E（桌面
+  runtime 为 rc5）。用户重启后的截图看到运行提示与“运行中”，
+  随后 `status` 对同一请求返回 `completed`——仅证明提示与完成，不据此称 native 或真实 FIFO；字号缩小后
+  的视觉待用户确认。不承诺普遍 HMR（无 `dev:web` watcher）。本次字号/客户端作用域修复未改 Host
+  产品/协议/依赖/profile；未发布。诊断 domain/key 与后端合同不符（本轮未改）：实际可能仅内存，重启后恢复不保证，核心会话历史
+  不受影响。
