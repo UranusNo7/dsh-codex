@@ -28,6 +28,29 @@ const COMPACTION_MARKER_OPEN = '<dsh-openai-codex-compaction-4f5cf1b7-v1>'
 const COMPACTION_MARKER_CLOSE = '</dsh-openai-codex-compaction-4f5cf1b7-v1>'
 const NO_SESSION = '<no-session>'
 
+/**
+ * Conservative token allowance for the Harness checkpoint framing that wraps
+ * the marker text (preamble plus opening and closing tags).
+ *
+ * The value was checked against the current Harness compaction frame; it is a
+ * margin for that runtime contract, not a strict cross-version upper bound.
+ */
+export const OPENAI_CODEX_CHECKPOINT_FRAME_ALLOWANCE = 256
+
+/**
+ * Estimate tokens for plain text, or `undefined` when no estimator is composed.
+ *
+ * This is a lower-bound source of truth for the plugin's own conservative
+ * pre-check; it is never presented as provider-accurate tokenization.
+ */
+export type TokenEstimator = (text: string) => number | undefined
+
+/** One in-flight compaction stream, bound to the source text it will replace. */
+interface CompactionCall {
+  /** Conservative source lower bound in tokens, or undefined when unavailable. */
+  readonly budget: number | undefined
+}
+
 type JsonRecord = Record<string, unknown>
 
 interface CompactResponse {
@@ -146,9 +169,12 @@ function sessionKey(sessionId: string | undefined): string {
 }
 
 /** Emit a one-block pi-ai response containing the durable native checkpoint marker. */
-function markerStream(model: Model<Api>, response: CompactResponse): AssistantMessageEventStream {
+function markerStream(
+  model: Model<Api>,
+  response: CompactResponse,
+  text: string
+): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream()
-  const text = nativeCompactionMarker(response.output)
   const partial: AssistantMessage = {
     role: 'assistant',
     content: [],
@@ -172,10 +198,10 @@ function markerStream(model: Model<Api>, response: CompactResponse): AssistantMe
   return stream
 }
 
-function failedStream(model: Model<Api>, error: unknown, signal?: AbortSignal): AssistantMessageEventStream {
-  const stream = createAssistantMessageEventStream()
+/** One terminal failure message for the pushed failure event. */
+function failureMessage(model: Model<Api>, error: unknown, signal?: AbortSignal): AssistantMessage {
   const aborted = signal?.aborted === true
-  const failure: AssistantMessage = {
+  return {
     role: 'assistant',
     content: [],
     api: 'openai-codex-responses',
@@ -186,10 +212,6 @@ function failedStream(model: Model<Api>, error: unknown, signal?: AbortSignal): 
     errorMessage: error instanceof Error ? error.message : String(error),
     timestamp: Date.now(),
   }
-  queueMicrotask(() => {
-    stream.push({ type: 'error', reason: aborted ? 'aborted' : 'error', error: failure })
-  })
-  return stream
 }
 
 function responseHeaders(headers: Headers): Record<string, string> {
@@ -324,21 +346,35 @@ function retainedCompactionInput(input: readonly unknown[]): unknown[] {
 
 /** Mutable request policy shared by the Harness adapter and its pi-ai provider. */
 export class OpenAICodexResponseRuntime {
-  private readonly compactionCalls = new Map<string, number>()
+  private readonly compactionCalls = new Map<string, CompactionCall[]>()
 
   constructor(
     private readonly preferences: () => ResponseApiPreferences,
-    private readonly requestFetch: FetchFunction = globalThis.fetch
+    private readonly requestFetch: FetchFunction = globalThis.fetch,
+    private readonly estimateText?: TokenEstimator
   ) {}
 
-  /** Mark one Harness stream call as compaction until its iterator closes. */
-  enterCompaction(sessionId: string | undefined): () => void {
+  /**
+   * Bind one Harness compaction stream to the source text it will replace.
+   *
+   * The source budget is captured synchronously, before the stream yields, so a
+   * later compaction call for the same session cannot rewrite this call's bound.
+   * The entry is popped by exact identity when the stream ends. Binding relies
+   * on the Harness compaction lock keeping one summarization stream per session:
+   * a normal request is not distinguished while that stream is composed.
+   */
+  enterCompaction(sessionId: string | undefined, sourceText?: string): () => void {
     const key = sessionKey(sessionId)
-    this.compactionCalls.set(key, (this.compactionCalls.get(key) ?? 0) + 1)
+    const stack = this.compactionCalls.get(key) ?? []
+    const call: CompactionCall = { budget: this.sourceBudget(sourceText) }
+    stack.push(call)
+    this.compactionCalls.set(key, stack)
     return () => {
-      const remaining = (this.compactionCalls.get(key) ?? 1) - 1
-      if (remaining <= 0) this.compactionCalls.delete(key)
-      else this.compactionCalls.set(key, remaining)
+      const current = this.compactionCalls.get(key)
+      if (current === undefined) return
+      const index = current.lastIndexOf(call)
+      if (index >= 0) current.splice(index, 1)
+      if (current.length === 0) this.compactionCalls.delete(key)
     }
   }
 
@@ -350,6 +386,31 @@ export class OpenAICodexResponseRuntime {
     }
   }
 
+  /** Conservative source budget in tokens, or undefined when it cannot be proven. */
+  private sourceBudget(sourceText: string | undefined): number | undefined {
+    if (sourceText === undefined || sourceText.length === 0) return undefined
+    return this.estimateTokens(sourceText)
+  }
+
+  /** Run the injected estimator, treating absent or unusable answers as unknown. */
+  private estimateTokens(text: string): number | undefined {
+    if (this.estimateText === undefined) return undefined
+    try {
+      const tokens = this.estimateText(text)
+      return tokens !== undefined && Number.isFinite(tokens) && tokens >= 0 ? tokens : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** Whether the native checkpoint can be shown to shrink below its source. */
+  private canPublishCheckpoint(marker: string, budget: number | undefined): boolean {
+    if (budget === undefined) return false
+    const tokens = this.estimateTokens(marker)
+    if (tokens === undefined) return false
+    return tokens + OPENAI_CODEX_CHECKPOINT_FRAME_ALLOWANCE < budget
+  }
+
   private streamSimple(
     provider: Provider,
     model: Model<Api>,
@@ -357,12 +418,13 @@ export class OpenAICodexResponseRuntime {
     options?: SimpleStreamOptions,
   ): AssistantMessageEventStream {
     const key = sessionKey(options?.sessionId)
-    const compaction = (this.compactionCalls.get(key) ?? 0) > 0
+    const compaction = this.compactionCalls.get(key)?.at(-1)
     const preferences = this.preferences()
-    if (compaction && preferences.useNativeCompaction) {
-      return this.nativeCompactionStream(provider, model, context, options)
+    if (compaction !== undefined && preferences.useNativeCompaction &&
+      compaction.budget !== undefined && compaction.budget > 0) {
+      return this.nativeCompactionStream(provider, model, context, options, compaction.budget)
     }
-    return this.standardStream(provider, model, context, options, !compaction && preferences.useWebSocketContextReuse)
+    return this.standardStream(provider, model, context, options, compaction === undefined && preferences.useWebSocketContextReuse)
   }
 
   private standardStream(
@@ -390,22 +452,59 @@ export class OpenAICodexResponseRuntime {
     provider: Provider,
     model: Model<Api>,
     context: PiContext,
-    options?: SimpleStreamOptions,
+    options: SimpleStreamOptions | undefined,
+    budget: number,
   ): AssistantMessageEventStream {
     const target = createAssistantMessageEventStream()
-    void this.requestNativeCompaction(model, context, options).then(
-      response => {
-        const source = markerStream(model, response)
-        void (async () => { for await (const event of source) target.push(event) })()
-      },
-      error => {
-        const source = options?.signal?.aborted === true
-          ? failedStream(model, error, options.signal)
-          : this.standardStream(provider, model, context, options, false)
-        void (async () => { for await (const event of source) target.push(event) })()
-      },
-    )
+    // One async owner: the source is chosen exactly once, and any selection or
+    // iteration failure becomes one explicit terminal event.
+    void (async () => {
+      try {
+        const source = await this.chooseCompactionStream(provider, model, context, options, budget)
+        for await (const event of source) target.push(event)
+      } catch (error) {
+        target.push({
+          type: 'error',
+          reason: options?.signal?.aborted === true ? 'aborted' : 'error',
+          error: failureMessage(model, error, options?.signal),
+        })
+      }
+    })()
     return target
+  }
+
+  /** Pick the native checkpoint or the ordinary summary, exactly once. */
+  private async chooseCompactionStream(
+    provider: Provider,
+    model: Model<Api>,
+    context: PiContext,
+    options: SimpleStreamOptions | undefined,
+    budget: number,
+  ): Promise<AssistantMessageEventStream> {
+    // Cancellation must propagate: this throw is turned into an aborted
+    // terminal event by the owner, never into a fallback request.
+    options?.signal?.throwIfAborted()
+    let response: CompactResponse | undefined
+    try {
+      response = await this.requestNativeCompaction(model, context, options)
+    } catch {
+      response = undefined
+    }
+    options?.signal?.throwIfAborted()
+    if (response === undefined) {
+      return this.standardStream(provider, model, context, options, false)
+    }
+    let marker: string | undefined
+    try {
+      marker = nativeCompactionMarker(response.output)
+    } catch {
+      // A malformed checkpoint cannot be published; use the ordinary summary.
+      marker = undefined
+    }
+    if (marker !== undefined && this.canPublishCheckpoint(marker, budget)) {
+      return markerStream(model, response, marker)
+    }
+    return this.standardStream(provider, model, context, options, false)
   }
 
   private async requestNativeCompaction(

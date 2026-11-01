@@ -45,10 +45,12 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
-  vi.unstubAllGlobals()
-  vi.unstubAllEnvs()
+  // Dispose first: the plugin owns a background catalog refresh whose request
+  // must stay inside the mocked transport, never after the stubs are removed.
   await context?.fiber.dispose()
   context = undefined
+  vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   await rm(workspace, { recursive: true, force: true })
   await rm(dshHome, { recursive: true, force: true })
 })
@@ -112,19 +114,44 @@ async function generate(
   })
 }
 
-function successfulFetch() {
-  return vi.fn(async () => new Response(JSON.stringify({
-    data: [{ b64_json: PNG_1X1.toString('base64') }],
-  }), { status: 200, headers: { 'content-type': 'application/json' } }))
+const CATALOG_REQUEST_PREFIX = 'https://chatgpt.com/backend-api/codex/models'
+
+interface ProviderFetch {
+  /** Global fetch stand-in: catalog prewarming is answered locally, images get the canned PNG. */
+  mock: ReturnType<typeof vi.fn>
+  /** Image requests only, so assertions stay strict while the catalog warms. */
+  image: Array<[string, RequestInit]>
+  /** Catalog prewarming requests, answered without touching the network. */
+  catalog: string[]
+}
+
+function successfulFetch(): ProviderFetch {
+  const image: Array<[string, RequestInit]> = []
+  const catalog: string[] = []
+  const mock = vi.fn(async (input: unknown, init?: RequestInit) => {
+    const url = String(input instanceof Request ? input.url : input)
+    if (url.startsWith(CATALOG_REQUEST_PREFIX)) {
+      catalog.push(url)
+      return new Response(JSON.stringify({ models: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    image.push([url, init ?? {}])
+    return new Response(JSON.stringify({
+      data: [{ b64_json: PNG_1X1.toString('base64') }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } })
+  })
+  return { mock, image, catalog }
 }
 
 describe('imagegen', () => {
   it('uses an injected request transport for image generation', async () => {
-    const requestFetch = successfulFetch()
+    const { mock: requestFetch } = successfulFetch()
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('global fetch must not run') }))
     const client = new OpenAICodex.OpenAICodexImageClient(
       new OpenAICodex.OpenAICodexCredentialStore(),
-      requestFetch,
+      requestFetch as unknown as typeof globalThis.fetch,
     )
 
     await expect(client.generate('A tiny red pixel', [], signal)).resolves.toEqual(PNG_1X1)
@@ -136,7 +163,7 @@ describe('imagegen', () => {
 
   it('generates an attachment and optionally publishes the same PNG to the workspace', async () => {
     const ctx = await setup({ imageGenerationModel: 'gpt-image-2.5-sunburst' })
-    const fetchMock = successfulFetch()
+    const { mock: fetchMock, image } = successfulFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await generate(ctx, { prompt: 'A tiny red pixel', output_path: 'art/pixel.png' })
@@ -154,7 +181,8 @@ describe('imagegen', () => {
       content: result.content,
     })
     expect(await readFile(join(workspace, 'art', 'pixel.png'))).toEqual(PNG_1X1)
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(image).toHaveLength(1)
+    const [url, init] = image[0] as [string, RequestInit]
     expect(url).toBe(OpenAICodex.OPENAI_CODEX_IMAGE_GENERATIONS_URL)
     const headers = new Headers(init.headers)
     expect(headers.get('authorization')).toBe(`Bearer ${accessToken('image-account')}`)
@@ -171,7 +199,7 @@ describe('imagegen', () => {
 
   it('saves under a unique workspace filename when output_path is omitted', async () => {
     const ctx = await setup()
-    vi.stubGlobal('fetch', successfulFetch())
+    vi.stubGlobal('fetch', successfulFetch().mock)
 
     const result = await generate(ctx, { prompt: 'A tiny red pixel' })
 
@@ -185,7 +213,7 @@ describe('imagegen', () => {
   it('reads reference paths through ctx.fs and sends data URLs only inside the provider request', async () => {
     const ctx = await setup()
     await writeFile(join(workspace, 'reference.png'), PNG_1X1)
-    const fetchMock = successfulFetch()
+    const { mock: fetchMock, image } = successfulFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await generate(ctx, {
@@ -194,7 +222,8 @@ describe('imagegen', () => {
     })
 
     expect(result.isError).toBe(false)
-    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(image).toHaveLength(1)
+    const [url, init] = image[0] as [string, RequestInit]
     expect(url).toBe(OpenAICodex.OPENAI_CODEX_IMAGE_EDITS_URL)
     const body = JSON.parse(init.body as string) as { images: Array<{ image_url: string }> }
     expect(body.images).toEqual([{ image_url: `data:image/png;base64,${PNG_1X1.toString('base64')}` }])
@@ -207,7 +236,7 @@ describe('imagegen', () => {
       content: [{ type: 'image', attachment: ref }],
       source: { kind: 'user' },
     })]
-    const fetchMock = successfulFetch()
+    const { mock: fetchMock, image } = successfulFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await generate(ctx, {
@@ -216,14 +245,15 @@ describe('imagegen', () => {
     }, messages)
 
     expect(result.isError).toBe(false)
-    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(image).toHaveLength(1)
+    const [, init] = image[0] as [string, RequestInit]
     const body = JSON.parse(init.body as string) as { images: Array<{ image_url: string }> }
     expect(body.images[0]?.image_url).toBe(`data:image/png;base64,${PNG_1X1.toString('base64')}`)
   })
 
   it('rejects ambiguous reference selection before making a provider request', async () => {
     const ctx = await setup()
-    const fetchMock = successfulFetch()
+    const { mock: fetchMock, image } = successfulFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await generate(ctx, {
@@ -234,36 +264,36 @@ describe('imagegen', () => {
 
     expect(result.isError).toBe(true)
     expect(result.content.find(block => block.type === 'text')?.text).toContain('provide only one')
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(image).toHaveLength(0)
   })
 
   it('honors the setting that disables imagegen for another model provider', async () => {
     const ctx = await setup({ shareImagegenWithOtherModels: false })
-    const fetchMock = successfulFetch()
+    const { mock: fetchMock, image } = successfulFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await generate(ctx, { prompt: 'A tiny pixel' }, [], 'vision-model', 'another-provider')
 
     expect(result.isError).toBe(true)
     expect(result.content.find(block => block.type === 'text')?.text).toContain('disabled for models outside')
-    expect(fetchMock).not.toHaveBeenCalled()
+    expect(image).toHaveLength(0)
   })
 
   it('keeps image generation available on the backend-authorized Luna Reserve route', async () => {
     const ctx = await setup({ shareImagegenWithOtherModels: false })
-    const fetchMock = successfulFetch()
+    const { mock: fetchMock, image } = successfulFetch()
     vi.stubGlobal('fetch', fetchMock)
 
     const result = await generate(ctx, { prompt: 'A tiny pixel' }, [], OpenAICodex.OPENAI_CODEX_LUNA_RESERVE_MODEL)
 
     expect(result.isError).toBe(false)
     expect(result.content.some(block => block.type === 'image')).toBe(true)
-    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(image).toHaveLength(1)
   })
 
   it('keeps the attachment but refuses output_path under a read-only filesystem policy', async () => {
     const ctx = await setup({}, 'read-only')
-    vi.stubGlobal('fetch', successfulFetch())
+    vi.stubGlobal('fetch', successfulFetch().mock)
 
     const result = await generate(ctx, { prompt: 'A tiny pixel', output_path: 'blocked.png' })
 

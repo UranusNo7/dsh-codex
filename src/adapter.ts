@@ -29,6 +29,7 @@ import type {
 import type { OpenAICodexCredentialStore } from "./store.ts";
 import { OPENAI_CODEX_PROVIDER } from "./store.ts";
 import { OpenAICodexResponseRuntime } from "./responses.ts";
+import type { TokenEstimator } from "./responses.ts";
 import type {
   ModelCatalogEntry,
   ResponseApiPreferences,
@@ -38,6 +39,7 @@ import {
   isSupportedOpenAICodexModel,
   OpenAICodexModelCatalog,
 } from "./model-catalog.ts";
+import type { OpenAICodexOfficialCatalogSource } from "./model-catalog.ts";
 
 const GPT_6_ASTRA = "gpt-6-astra";
 const GPT_6_SOL = "gpt-6-sol";
@@ -235,8 +237,14 @@ function withOpenAICodexLunaReserve(provider: Provider): Provider {
   };
 }
 
+/** Catalogs owned by a provider, used to expose the advertised (picker) subset. */
+const catalogs = new WeakMap<Provider, OpenAICodexModelCatalog>();
+
 /** Keep bundled models as a fallback and discover new releases from Codex metadata. */
-export function createOpenAICodexModelProvider(requestFetch?: typeof globalThis.fetch): Provider {
+export function createOpenAICodexModelProvider(
+  requestFetch?: typeof globalThis.fetch,
+  officialCatalog?: OpenAICodexOfficialCatalogSource
+): Provider {
   const upstream = openaiCodexProvider(requestFetch);
   const provider = withOpenAICodexModelOrder(
     withCurrentOpenAICodexModels({
@@ -246,25 +254,41 @@ export function createOpenAICodexModelProvider(requestFetch?: typeof globalThis.
       ),
     })
   );
-  const catalog = new OpenAICodexModelCatalog(provider.getModels());
-  return withOpenAICodexLunaReserve({
+  const catalog = new OpenAICodexModelCatalog(
+    provider.getModels(),
+    undefined,
+    officialCatalog
+  );
+  const resolved = withOpenAICodexLunaReserve({
     ...provider,
     getModels: () => catalog.getModels(),
   });
+  catalogs.set(resolved, catalog);
+  return resolved;
 }
 
 /** Return a detached copy of the current Codex model catalog for settings. */
 export function openAICodexModelCatalog(
   provider: Provider = createOpenAICodexModelProvider()
 ): readonly ModelCatalogEntry[] {
-  return provider
-    .getModels()
+  // Settings candidates follow the official list when one is authoritative;
+  // bundled-only entries stay resolvable for in-flight and resumed sessions.
+  const catalog = catalogs.get(provider);
+  const models = catalog === undefined ? provider.getModels() : catalog.advertised();
+  return models
     .filter((model) => model.id !== OPENAI_CODEX_LUNA_RESERVE_MODEL)
     .map((model) => ({
       id: model.id,
       name: model.name,
       contextWindow: model.contextWindow,
     }));
+}
+
+/** Report which non-official source currently supplies model metadata. */
+export function openAICodexModelCatalogSource(
+  provider: Provider
+): "codex-cache" | "bundled" {
+  return catalogs.get(provider)?.fallbackSource() ?? "bundled";
 }
 
 /** Provider idle ceiling used by the composite route. */
@@ -425,8 +449,34 @@ export function migrateLegacyOpenAICodexReplayState(value: unknown): unknown {
   };
 }
 
-function migrateReplayHistory(options: GenerateOptions): GenerateOptions {
-  let changed = false;
+/**
+ * Conservative textual source of one compaction call.
+ *
+ * Uses the Harness request messages exactly as the backend receives them, then
+ * drops the trailing summarization instruction and every system-role message.
+ * Only existing `text` blocks count: reasoning, tool-call arguments, images,
+ * and file attachments are excluded so the result stays a lower bound.
+ */
+function compactionSourceText(
+  messages: GenerateOptions["messages"]
+): string | undefined {
+  const parts: string[] = [];
+  for (const message of messages.slice(0, -1)) {
+    const record = message as unknown as { role?: unknown; content?: unknown };
+    if (record.role === "system") continue;
+    const content = record.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (typeof block !== "object" || block === null) continue;
+      const typed = block as unknown as { type?: unknown; text?: unknown };
+      if (typed.type !== "text" || typeof typed.text !== "string") continue;
+      if (typed.text.length > 0) parts.push(typed.text);
+    }
+  }
+  return parts.length === 0 ? undefined : parts.join("\n");
+}
+
+function migrateReplayHistory(options: GenerateOptions): GenerateOptions {  let changed = false;
   const messages = options.messages.map((message) => {
     if (
       message.role !== "assistant" ||
@@ -592,7 +642,8 @@ class OpenAICodexAdapter extends PiAiAdapter {
         ? this.responses.enterCompaction(
             options.sessionId === undefined
               ? undefined
-              : String(options.sessionId)
+              : String(options.sessionId),
+            compactionSourceText(options.messages)
           )
         : undefined;
     try {
@@ -635,7 +686,8 @@ export function createOpenAICodexAdapter(
   contextWindow?: () => number | null | undefined,
   requestFetch?: FetchFunction,
   fastModeDefault?: () => boolean,
-  modelProvider: Provider = createOpenAICodexModelProvider()
+  modelProvider: Provider = createOpenAICodexModelProvider(),
+  estimateText?: TokenEstimator
 ): PiAiAdapter {
   const provider = requestProvider(
     modelProvider,
@@ -645,7 +697,8 @@ export function createOpenAICodexAdapter(
   );
   const responses = new OpenAICodexResponseRuntime(
     responsePreferences,
-    requestFetch
+    requestFetch,
+    estimateText
   );
   const unset = Symbol("unset context window");
   let resolvedContextWindow: number | null | undefined | typeof unset = unset;

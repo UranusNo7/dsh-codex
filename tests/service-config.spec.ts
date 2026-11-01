@@ -1,8 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve, join } from 'node:path'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Config } from '../src/index.ts'
 import { OpenAICodexService } from '../src/service.ts'
 import { openAICodexAuthPath } from '../src/store.ts'
-import { resolve } from 'node:path'
+
+const directories: string[] = []
+function isolatedHome(): string {
+  const directory = mkdtempSync(join(tmpdir(), 'dsh-codex-service-'))
+  directories.push(directory)
+  vi.stubEnv('DSH_HOME', directory)
+  return directory
+}
 
 const preferences = {
   modifyReadImage: true,
@@ -18,19 +28,29 @@ const preferences = {
   modelCatalog: [],
 }
 
+afterEach(() => {
+  vi.unstubAllEnvs()
+  for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true })
+})
+
 describe('credentialFile configuration seam', () => {
-  it('passes the explicit credential filename into the shared service store', () => {
+  it('passes the explicit credential filename into the shared service store', async () => {
+    isolatedHome()
     const filename = resolve('fixture-auth.json')
     const config = new Config({ credentialFile: filename })
     const service = new OpenAICodexService({ ...preferences, credentialFile: filename })
     expect(config.credentialFile).toBe(filename)
     expect(service.credentials.filename).toBe(filename)
+    await service.dispose()
   })
 
-  it('retains the DSH_HOME-derived filename when credentialFile is absent', () => {
+  it('retains the DSH_HOME-derived filename when credentialFile is absent', async () => {
+    const home = isolatedHome()
     const config = new Config()
     const service = new OpenAICodexService(preferences)
     expect(config.credentialFile).toBeUndefined()
     expect(service.credentials.filename).toBe(openAICodexAuthPath())
+    expect(service.credentials.filename.startsWith(home)).toBe(true)
+    await service.dispose()
   })
 })

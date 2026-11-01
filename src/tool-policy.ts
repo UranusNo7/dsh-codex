@@ -53,9 +53,26 @@ export interface ModelFallbackPreferences {
   automaticModelFallback: boolean;
 }
 
+/** Where the current provider model candidates came from. */
+export type ModelCatalogSource =
+  | "official"
+  | "cache"
+  | "bundled"
+  | "codex-cache";
+
+/** Non-secret provenance for the model candidates returned to the browser. */
+export interface ModelCatalogDiscovery {
+  source: ModelCatalogSource;
+  /** Epoch milliseconds of the last successful official fetch. */
+  updatedAt?: number;
+  /** Fixed, sanitized failure reason; never provider response text. */
+  error?: string;
+}
+
 /** Browser projection containing both available and currently visible models. */
 export interface ModelCatalogSettings extends ModelCatalogPreferences {
   availableModels: ModelCatalogEntry[];
+  discovery?: ModelCatalogDiscovery;
 }
 
 interface OpenAICodexPreferences

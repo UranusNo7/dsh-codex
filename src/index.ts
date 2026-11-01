@@ -15,12 +15,15 @@ import type {} from "@deepseek-ai/dsh-host-webserver";
 import type {} from "@deepseek-ai/dsh-tools";
 import type {} from "@deepseek-ai/dsh-fs";
 import type {} from "@deepseek-ai/dsh-settings";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type {} from "@deepseek-ai/cordis-plugin-loader";
 import {
   createOpenAICodexAdapter,
   createOpenAICodexModelProvider,
   openAICodexModelCatalog,
+  openAICodexModelCatalogSource,
 } from "./adapter.ts";
+import type { TokenEstimator } from "./responses.ts";
 import { registerOpenAICodexAuthRoutes } from "./auth-routes.ts";
 import { installReadImageEnhancement } from "./read-image-enhancement.ts";
 import { imagegenTool } from "./imagegen.ts";
@@ -98,6 +101,7 @@ import {
 } from "./image-model.ts";
 import type { OpenAICodexImageModel } from "./image-model.ts";
 import { apply as applyNetworkProxy } from "./net-proxy/index.js";
+import { localNetworkProxyTool } from "./local-network-proxy-tool.ts";
 
 export { OpenAICodexService } from "./service.ts";
 export type { OpenAICodexServiceOptions } from "./service.ts";
@@ -113,6 +117,10 @@ export type {
   NetworkProxyScope,
   NetworkProxySnapshot,
 } from "./net-proxy/index.js";
+export {
+  LOCAL_NETWORK_PROXY_TOOL_NAME,
+  localNetworkProxyTool,
+} from "./local-network-proxy-tool.ts";
 export {
   DEFAULT_PROXY_PREFERENCES,
   normalizeProxyUrl,
@@ -148,6 +156,8 @@ export {
   resolveOpenAICodexFallback,
 } from "./model-fallback.ts";
 export { OPENAI_CODEX_LUNA_RESERVE_MODEL } from "./adapter.ts";
+export { OPENAI_CODEX_CHECKPOINT_FRAME_ALLOWANCE } from "./responses.ts";
+export type { TokenEstimator } from "./responses.ts";
 
 export {
   loginOpenAICodex,
@@ -284,7 +294,16 @@ export function apply(ctx: Context, config: Config): void {
   const settingsNamespace = (ctx.fiber as unknown as {
     entry?: { options?: { id?: string } };
   }).entry?.options?.id ?? name;
-  const modelProvider = createOpenAICodexModelProvider((input, init) => service.proxy.fetch(input, init));
+  // The catalog and service reference each other lazily: the transport is only
+  // used for real requests, and the official snapshot only after composition.
+  let created: OpenAICodexService | undefined;
+  const modelProvider = createOpenAICodexModelProvider(
+    (input, init) =>
+      created === undefined
+        ? globalThis.fetch(input, init)
+        : created.proxy.fetch(input, init),
+    () => created?.modelCatalogOfficial()
+  );
   const livePreferences = () => ({
     models: [...liveValue(config.models, openAICodexModelCatalog(modelProvider).map((model) => model.id))],
     contextWindow: liveValue(config.contextWindow, null),
@@ -302,11 +321,28 @@ export function apply(ctx: Context, config: Config): void {
     ...(config.credentialFile === undefined ? {} : { credentialFile: config.credentialFile }),
     settingsNamespace,
     modelCatalog: () => openAICodexModelCatalog(modelProvider),
+    modelCatalogSource: () => openAICodexModelCatalogSource(modelProvider),
+    warmModelCatalog: true,
     ...livePreferences(),
   });
+  created = service;
   const credentials = service.credentials;
   const imageTools = service.policy;
   const fastMode = new FastModeRegistry();
+  // Resolved lazily on every estimate: a composition without a token meter
+  // degrades the native checkpoint to the ordinary summary instead of guessing.
+  const estimateCompactionText: TokenEstimator = (text) => {
+    const meter = (ctx as unknown as { get(name: string): unknown }).get(
+      "tokenMeter"
+    ) as { estimateMessage(message: unknown): number } | undefined;
+    if (meter === undefined) return undefined;
+    return meter.estimateMessage(
+      createUserMessage({
+        content: [{ type: "text", text }],
+        source: { kind: "user" },
+      })
+    );
+  };
   assertNoOpenAICodexProviderConflict(
     ctx.llm.listProviders().map((provider) => provider.id)
   );
@@ -334,7 +370,8 @@ export function apply(ctx: Context, config: Config): void {
       () => imageTools.contextWindowSnapshot().contextWindow,
       service.proxy.fetch,
       () => imageTools.fastModeSnapshot().fastModeDefault,
-      modelProvider
+      modelProvider,
+      estimateCompactionText
     )
   );
   ctx.effect(
@@ -375,6 +412,9 @@ export function apply(ctx: Context, config: Config): void {
   // above; "global" scope additionally takes over the process dispatcher.
   ctx.inject(["webServer"], (webCtx) => {
     applyNetworkProxy(webCtx);
+  });
+  ctx.inject(["tools"], (toolCtx) => {
+    toolCtx.tools.register(localNetworkProxyTool());
   });
   ctx.inject(["tools", "fs", "attachments"], (toolCtx) => {
     toolCtx.tools.register(

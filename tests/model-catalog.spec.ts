@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { openaiCodexProvider } from "@earendil-works/pi-ai/providers/openai-codex";
 import { OpenAICodexModelCatalog, mergeOpenAICodexModels, openAICodexModelsCachePath } from "../src/model-catalog.ts";
+import type { OpenAICodexOfficialSnapshot } from "../src/model-catalog-remote.ts";
 import { createOpenAICodexAdapter, createOpenAICodexModelProvider, openAICodexModelCatalog } from "../src/adapter.ts";
 import { ImageToolPolicy } from "../src/tool-policy.ts";
 import type { OpenAICodexCredentialStore } from "../src/store.ts";
@@ -187,5 +188,93 @@ describe("Codex model discovery", () => {
     expect((await adapter.resolveModel("openai-codex", "gpt-future-model")).context?.contextWindow).toBe(272_000);
     expect((await adapter.prepareCall("openai-codex", "gpt-6-astra")).model.context?.contextWindow).toBe(512_000);
     expect(first.model.context?.contextWindow).toBe(272_000);
+  });
+});
+
+describe("official catalog authority", () => {
+  const official = (models: unknown[], accountHash = "account-a") =>
+    ({ models, fetchedAt: 1_000, accountHash, source: "official" }) as unknown as OpenAICodexOfficialSnapshot;
+  const entry = (slug: string) => ({ ...astra, slug });
+
+  it("advertises only the official list while keeping bundled transport resolvable", () => {
+    const filename = cacheFile();
+    vi.stubEnv("DSH_CODEX_MODELS_CACHE", filename);
+    const provider = createOpenAICodexModelProvider(
+      undefined,
+      () => official([entry("gpt-6-astra"), entry("gpt-9-future")])
+    );
+    const advertised = openAICodexModelCatalog(provider).map((model) => model.id);
+    expect(advertised).toEqual(["gpt-6-astra", "gpt-9-future"]);
+    // Bundled-only models stay transport-resolvable for resumed sessions.
+    expect(provider.getModels().map((model) => model.id)).toContain("gpt-5.5");
+    const future = provider.getModels().find((model) => model.id === "gpt-9-future");
+    expect(future).toMatchObject({
+      provider: "openai-codex",
+      baseUrl: "https://chatgpt.com/backend-api",
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
+  it("never lets the Codex cache override a successful official catalog", () => {
+    const filename = cacheFile();
+    vi.stubEnv("DSH_CODEX_MODELS_CACHE", filename);
+    writeCache(filename, [{ ...astra, context_window: 512_000 }]);
+    const provider = createOpenAICodexModelProvider(
+      undefined,
+      () => official([entry("gpt-6-astra")])
+    );
+    expect(openAICodexModelCatalog(provider).find((model) => model.id === "gpt-6-astra")?.contextWindow)
+      .toBe(272_000);
+  });
+
+  it("keeps a dropped model resolvable for the same account but hides it from the picker", () => {
+    const filename = cacheFile();
+    vi.stubEnv("DSH_CODEX_MODELS_CACHE", filename);
+    let snapshot = official([entry("gpt-6-astra"), entry("gpt-9-future")]);
+    const provider = createOpenAICodexModelProvider(undefined, () => snapshot);
+    expect(openAICodexModelCatalog(provider).map((model) => model.id))
+      .toEqual(["gpt-6-astra", "gpt-9-future"]);
+    snapshot = official([entry("gpt-6-astra")]);
+    expect(openAICodexModelCatalog(provider).map((model) => model.id)).toEqual(["gpt-6-astra"]);
+    expect(provider.getModels().map((model) => model.id)).toContain("gpt-9-future");
+  });
+
+  it("drops retained transport metadata when the account changes", () => {
+    const filename = cacheFile();
+    vi.stubEnv("DSH_CODEX_MODELS_CACHE", filename);
+    let snapshot = official([entry("gpt-6-astra"), entry("gpt-9-future")]);
+    const provider = createOpenAICodexModelProvider(undefined, () => snapshot);
+    expect(provider.getModels().map((model) => model.id)).toContain("gpt-9-future");
+    snapshot = official([entry("gpt-6-astra")], "account-b");
+    expect(provider.getModels().map((model) => model.id)).not.toContain("gpt-9-future");
+    expect(openAICodexModelCatalog(provider).map((model) => model.id)).toEqual(["gpt-6-astra"]);
+  });
+
+  it("keeps an explicit empty reasoning list as a non-reasoning model", () => {
+    const filename = cacheFile();
+    vi.stubEnv("DSH_CODEX_MODELS_CACHE", filename);
+    const provider = createOpenAICodexModelProvider(
+      undefined,
+      () => official([{ ...astra, supported_reasoning_levels: [] }])
+    );
+    const model = provider.getModels().find((entry) => entry.id === "gpt-6-astra");
+    expect(model?.reasoning).toBe(false);
+    expect(Object.values(model?.thinkingLevelMap ?? { x: null })).toEqual([null, null, null, null, null, null, null]);
+  });
+
+  it("falls back to the full bundled catalog when no official snapshot exists", () => {
+    const filename = cacheFile();
+    vi.stubEnv("DSH_CODEX_MODELS_CACHE", filename);
+    const provider = createOpenAICodexModelProvider(undefined, () => undefined);
+    expect(openAICodexModelCatalog(provider).map((model) => model.id)).toEqual([
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-6.1-terra",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna",
+      "gpt-5.5",
+    ]);
   });
 });

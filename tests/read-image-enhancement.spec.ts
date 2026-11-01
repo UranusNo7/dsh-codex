@@ -26,13 +26,19 @@ let delegatedPaths: string[]
 beforeEach(async () => {
   workspace = await mkdtemp(join(tmpdir(), 'dsh-openai-codex-read-image-'))
   dshHome = await mkdtemp(join(tmpdir(), 'dsh-openai-codex-read-image-home-'))
+  // The plugin owns a background catalog warm: isolate the credential home so
+  // it can never read a real account, and keep the network unreachable.
+  vi.stubEnv('DSH_HOME', dshHome)
+  vi.stubGlobal('fetch', async () => { throw new Error('unexpected network access') })
   delegatedPaths = []
 })
 
 afterEach(async () => {
-  vi.unstubAllGlobals()
+  // Dispose before the stubs disappear so no warm request escapes them.
   await ctx?.fiber.dispose()
   ctx = undefined
+  vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   await rm(workspace, { recursive: true, force: true })
   await rm(dshHome, { recursive: true, force: true })
 })

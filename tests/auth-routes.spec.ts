@@ -13,6 +13,7 @@ import {
   OPENAI_CODEX_CONTEXT_WINDOW_SETTINGS_PATH,
   OPENAI_CODEX_IMAGE_TOOL_SETTINGS_PATH,
   OPENAI_CODEX_MODEL_CATALOG_SETTINGS_PATH,
+  OPENAI_CODEX_MODEL_CATALOG_REFRESH_PATH,
   OPENAI_CODEX_MODEL_FALLBACK_SETTINGS_PATH,
   OPENAI_CODEX_PROXY_SETTINGS_PATH,
   REMOTE_WEB_ORIGIN_NOT_TRUSTED,
@@ -20,7 +21,7 @@ import {
   trustedRequestDecision,
 } from '../src/auth-routes.ts'
 import type { OpenAICodexCredentialStore } from '../src/store.ts'
-import type { ImageToolPolicy, ImageToolPreferences } from '../src/tool-policy.ts'
+import type { ImageToolPolicy, ImageToolPreferences, ModelCatalogSettings } from '../src/tool-policy.ts'
 import { OpenAICodexTrustedOriginsStore } from '../src/trusted-origins.ts'
 import {
   OPENAI_CODEX_REAUTH_REQUIRED_MESSAGE,
@@ -87,6 +88,10 @@ function captureRoutes(
   proxySettings?: {
     proxyPreferences(): { proxyMode: 'off' | 'scoped' | 'global'; proxyUrl: string }
     updateProxyPreferences(patch: Partial<{ proxyMode: 'off' | 'scoped' | 'global'; proxyUrl: string }>): Promise<{ proxyMode: 'off' | 'scoped' | 'global'; proxyUrl: string }>
+    modelCatalogSettings?(): ModelCatalogSettings
+    refreshModelCatalog?(force: boolean): Promise<ModelCatalogSettings>
+    adoptModelCatalogAccount?(): void
+    clearModelCatalogAccount?(): void
   },
 ): CapturedRoute[] {
   const routes: CapturedRoute[] = []
@@ -701,5 +706,104 @@ describe('OpenAI Codex Web OAuth boundary', () => {
       quotaError: 'OpenAI Codex usage request failed with HTTP 503',
     })
     expect(mocked.logout).not.toHaveBeenCalled()
+  })
+})
+
+describe('model catalog discovery routes', () => {
+  function controls() {
+    const settings: ModelCatalogSettings = {
+      availableModels: [
+        { id: 'gpt-6-astra', name: 'GPT-6-Astra', contextWindow: 272_000 },
+        { id: 'gpt-9-future', name: 'GPT-9-Future', contextWindow: 500_000 },
+      ],
+      models: ['gpt-6-astra'],
+      discovery: { source: 'official', updatedAt: 1_700_000_000_000 },
+    }
+    const refreshModelCatalog = vi.fn(async (_force: boolean) => settings)
+    const modelCatalogSettings = vi.fn(() => settings)
+    const updateModelCatalog = vi.fn(async () => ({
+      availableModels: settings.availableModels,
+      models: ['gpt-9-future'],
+    }))
+    const preferences = {
+      modelCatalogSnapshot: vi.fn(() => settings),
+      updateModelCatalog,
+    } as unknown as ImageToolPolicy
+    const proxySettings = {
+      proxyPreferences: () => ({ proxyMode: 'off' as const, proxyUrl: '' }),
+      updateProxyPreferences: async (patch: Partial<{ proxyMode: 'off' | 'scoped' | 'global'; proxyUrl: string }>) =>
+        ({ proxyMode: patch.proxyMode ?? 'off', proxyUrl: patch.proxyUrl ?? '' }),
+      modelCatalogSettings,
+      refreshModelCatalog,
+    }
+    return { settings, refreshModelCatalog, modelCatalogSettings, updateModelCatalog, preferences, proxySettings }
+  }
+
+  function routeTo(routes: CapturedRoute[], path: string): CapturedRoute {
+    const route = routes.find((candidate) => candidate.path === path)
+    if (route === undefined) throw new Error(`${path} was not registered`)
+    return route
+  }
+
+  it('awaits the TTL refresh before answering the settings read', async () => {
+    const { settings, refreshModelCatalog, preferences, proxySettings } = controls()
+    const route = routeTo(
+      captureRoutes(emptyTrustedOrigins, preferences, proxySettings),
+      OPENAI_CODEX_MODEL_CATALOG_SETTINGS_PATH
+    )
+    const res = response()
+    await route.handler(request({}), res)
+    expect(refreshModelCatalog).toHaveBeenCalledWith(false)
+    expect(res.observed.status).toBe(200)
+    expect(JSON.parse(res.observed.body ?? 'null')).toEqual(settings)
+  })
+
+  it('keeps discovery in the response that saves the checkbox selection', async () => {
+    const { settings, modelCatalogSettings, preferences, proxySettings } = controls()
+    const route = routeTo(
+      captureRoutes(emptyTrustedOrigins, preferences, proxySettings),
+      OPENAI_CODEX_MODEL_CATALOG_SETTINGS_PATH
+    )
+    const res = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ models: ['gpt-9-future'] }),
+    }), res)
+    expect(modelCatalogSettings).toHaveBeenCalled()
+    expect(res.observed.status).toBe(200)
+    expect(JSON.parse(res.observed.body ?? 'null')).toEqual(settings)
+  })
+
+  it('forces a refresh only through the dedicated POST route', async () => {
+    const { settings, refreshModelCatalog, preferences, proxySettings } = controls()
+    const route = routeTo(
+      captureRoutes(emptyTrustedOrigins, preferences, proxySettings),
+      OPENAI_CODEX_MODEL_CATALOG_REFRESH_PATH
+    )
+    const methodNotAllowed = response()
+    await route.handler(request({}), methodNotAllowed)
+    expect(methodNotAllowed.observed.status).toBe(405)
+    expect(refreshModelCatalog).not.toHaveBeenCalled()
+
+    const res = response()
+    await route.handler(request({ method: 'POST' }), res)
+    expect(refreshModelCatalog).toHaveBeenCalledWith(true)
+    expect(res.observed.status).toBe(200)
+    expect(JSON.parse(res.observed.body ?? 'null')).toEqual(settings)
+  })
+
+  it('rejects an untrusted origin before touching the catalog', async () => {
+    const { refreshModelCatalog, preferences, proxySettings } = controls()
+    const route = routeTo(
+      captureRoutes(emptyTrustedOrigins, preferences, proxySettings),
+      OPENAI_CODEX_MODEL_CATALOG_REFRESH_PATH
+    )
+    const res = response()
+    await route.handler(
+      request({ method: 'POST', remoteAddress: '203.0.113.9' }),
+      res
+    )
+    expect(res.observed.status).toBe(403)
+    expect(refreshModelCatalog).not.toHaveBeenCalled()
   })
 })

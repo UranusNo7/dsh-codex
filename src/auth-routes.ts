@@ -36,6 +36,7 @@ import type {
   ImageToolPolicy,
   ImageToolPreferences,
   ModelCatalogPreferences,
+  ModelCatalogSettings,
   ModelFallbackPreferences,
   ResponseApiPreferences,
 } from "./tool-policy.ts";
@@ -60,6 +61,9 @@ export const OPENAI_CODEX_RESPONSE_API_SETTINGS_PATH =
 /** Plugin-owned model discovery preference endpoint consumed by its browser half. */
 export const OPENAI_CODEX_MODEL_CATALOG_SETTINGS_PATH =
   "/plugins/dsh-openai-codex/models";
+/** Plugin-owned forced catalog refresh consumed by its browser half. */
+export const OPENAI_CODEX_MODEL_CATALOG_REFRESH_PATH =
+  "/plugins/dsh-openai-codex/models/refresh";
 /** Plugin-owned client-side context capacity endpoint consumed by its browser half. */
 export const OPENAI_CODEX_CONTEXT_WINDOW_SETTINGS_PATH =
   "/plugins/dsh-openai-codex/context-window";
@@ -117,6 +121,8 @@ export interface OpenAICodexWebAuthOptions {
   requestFetch?: typeof globalThis.fetch;
   beforeNetworkRequest?: () => Promise<void>;
   readUsage?: () => Promise<OpenAICodexUsage>;
+  /** Called once a sign-in attempt ends with a usable stored credential. */
+  onSignedIn?: () => void;
 }
 
 /** Redact provider diagnostics before they cross to the browser. */
@@ -166,6 +172,7 @@ export class OpenAICodexWebAuth {
   private readonly requestFetch: typeof globalThis.fetch;
   private readonly beforeNetworkRequest: (() => Promise<void>) | undefined;
   private readonly readUsage: () => Promise<OpenAICodexUsage>;
+  private readonly onSignedIn: (() => void) | undefined;
 
   constructor(
     private readonly store: OpenAICodexCredentialStore,
@@ -179,6 +186,7 @@ export class OpenAICodexWebAuth {
     this.beforeNetworkRequest = options.beforeNetworkRequest;
     this.readUsage = options.readUsage ?? (() =>
       readOpenAICodexRateLimits(this.store, this.requestFetch));
+    this.onSignedIn = options.onSignedIn;
     if (
       !Number.isFinite(this.challengeTimeoutMs) ||
       this.challengeTimeoutMs <= 0
@@ -239,6 +247,17 @@ export class OpenAICodexWebAuth {
     await this.operation?.catch(() => undefined);
   }
 
+  /** Publish a settled status, adopting a new account's model catalog once. */
+  private publishState(state: OpenAICodexWebAuthStatus): void {
+    this.state = state;
+    if (state.status !== "signed-in") return;
+    try {
+      this.onSignedIn?.();
+    } catch {
+      // A catalog refresh must never turn a finished sign-in into a failure.
+    }
+  }
+
   private start(method: OpenAICodexLoginMethod): void {
     const cancellation = new AbortController();
     this.cancellation = cancellation;
@@ -296,7 +315,7 @@ export class OpenAICodexWebAuth {
             this.state = { status: "error", message: safeMessage(error) };
             return;
           }
-          this.state = await this.readStoredStatus();
+          this.publishState(await this.readStoredStatus());
         },
         async (error: unknown) => {
           this.rejectChallenge(error);
@@ -305,7 +324,7 @@ export class OpenAICodexWebAuth {
           try {
             const stored = await this.readStoredStatus();
             if (stored.status === "signed-in") {
-              this.state = stored;
+              this.publishState(stored);
               return;
             }
           } catch {
@@ -824,12 +843,20 @@ function proxyPreferencePatch(
   return patch;
 }
 
-interface ProxySettingsController {
+interface OpenAICodexWebSettingsController {
   proxyPreferences(): ProxyPreferences;
   updateProxyPreferences(
     patch: Partial<ProxyPreferences>
   ): Promise<ProxyPreferences>;
   usage?(forceRefresh?: boolean): Promise<OpenAICodexUsage>;
+  /** Current candidates with provenance; never performs network work. */
+  modelCatalogSettings?(): ModelCatalogSettings;
+  /** Refresh the official catalog (TTL-gated unless forced) before answering. */
+  refreshModelCatalog?(force: boolean): Promise<ModelCatalogSettings>;
+  /** Adopt the newly authenticated account's catalog, discarding the previous one. */
+  adoptModelCatalogAccount?(): void;
+  /** Drop the signed-out account's catalog without refreshing. */
+  clearModelCatalogAccount?(): void;
 }
 
 /** Register the plugin-owned OAuth routes when the Web server is composed. */
@@ -839,7 +866,7 @@ export function registerOpenAICodexAuthRoutes(
   trustedOriginsOverride?: OpenAICodexTrustedOriginsStore,
   fastModeOverride?: FastModeRegistry,
   imageTools?: ImageToolPolicy,
-  proxySettings?: ProxySettingsController,
+  proxySettings?: OpenAICodexWebSettingsController,
   requestFetch?: typeof globalThis.fetch,
   beforeNetworkRequest?: () => Promise<void>
 ): void {
@@ -849,6 +876,11 @@ export function registerOpenAICodexAuthRoutes(
     ...(proxySettings?.usage === undefined
       ? {}
       : { readUsage: () => proxySettings.usage!() }),
+    ...(proxySettings?.adoptModelCatalogAccount === undefined
+      ? {}
+      : {
+          onSignedIn: () => proxySettings.adoptModelCatalogAccount!(),
+        }),
   });
   const storedFilename = (
     store as OpenAICodexCredentialStore & { filename?: unknown }
@@ -934,6 +966,7 @@ export function registerOpenAICodexAuthRoutes(
           if (!(await authorize(req, res))) return;
           try {
             await auth.signOut();
+            proxySettings?.clearModelCatalogAccount?.();
             json(res, 200, { ok: true });
           } catch (error: unknown) {
             json(res, 500, { error: safeMessage(error) });
@@ -1056,23 +1089,58 @@ export function registerOpenAICodexAuthRoutes(
               path: OPENAI_CODEX_MODEL_CATALOG_SETTINGS_PATH,
               handler: async (req, res) => {
                 if (!(await authorize(req, res))) return;
-                if (req.method === "GET")
-                  return json(res, 200, imageTools.modelCatalogSnapshot());
+                if (req.method === "GET") {
+                  // Opening Settings awaits the TTL-gated catalog refresh, so
+                  // the answer already carries the newest candidates. The wait
+                  // is bounded by the catalog timeout and never delays chat.
+                  const settings =
+                    proxySettings?.refreshModelCatalog === undefined
+                      ? imageTools.modelCatalogSnapshot()
+                      : await proxySettings.refreshModelCatalog(false);
+                  return json(res, 200, settings);
+                }
                 if (req.method !== "POST")
                   return json(res, 405, { error: "method not allowed" });
                 try {
+                  const saved = await imageTools.updateModelCatalog(
+                    modelCatalogPatch(await readSettingsBody(req))
+                  );
+                  // Saving checkboxes must keep the source/updatedAt the page
+                  // already shows, so the response carries the same shape.
                   return json(
                     res,
                     200,
-                    await imageTools.updateModelCatalog(
-                      modelCatalogPatch(await readSettingsBody(req))
-                    )
+                    proxySettings?.modelCatalogSettings === undefined
+                      ? saved
+                      : proxySettings.modelCatalogSettings()
                   );
                 } catch (error: unknown) {
                   return json(res, 400, { error: safeMessage(error) });
                 }
               },
             }),
+            ...(proxySettings?.refreshModelCatalog === undefined
+              ? []
+              : [
+                  ctx.webServer.register({
+                    kind: "exact",
+                    path: OPENAI_CODEX_MODEL_CATALOG_REFRESH_PATH,
+                    handler: async (req, res) => {
+                      if (!(await authorize(req, res))) return;
+                      if (req.method !== "POST")
+                        return json(res, 405, { error: "method not allowed" });
+                      try {
+                        return json(
+                          res,
+                          200,
+                          await proxySettings.refreshModelCatalog!(true)
+                        );
+                      } catch (error: unknown) {
+                        return json(res, 500, { error: safeMessage(error) });
+                      }
+                    },
+                  }),
+                ]),
             ctx.webServer.register({
               kind: "exact",
               path: OPENAI_CODEX_FAST_MODE_SETTINGS_PATH,

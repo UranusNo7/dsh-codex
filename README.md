@@ -9,7 +9,7 @@ Use a ChatGPT subscription in [DeepSeek Harness](https://github.com/deepseek-ai/
 `dsh-codex` is an independent dsh bundle. It adds:
 
 - ChatGPT OAuth from the dsh Settings panel or a standalone CLI, with automatic token refresh
-- the Codex GPT catalog, including bundled GPT-6.1 Terra (500K default context, text and image input) alongside vision-capable models when the account offers them
+- a dynamic Codex GPT catalog refreshed from the official Codex endpoint with a 300-second TTL and a manual **Refresh from OpenAI** action, falling back to the Codex app cache and then bundled models (including GPT-6.1 Terra, 500K default context)
 - a live client-side context-window capacity override for dsh's token meter and compaction policy
 - streaming, tool calls, reasoning replay, prompt caching, and dsh compaction through the normal LLM service
 - Codex standalone web search through dsh's existing `web_search` tool
@@ -18,8 +18,9 @@ Use a ChatGPT subscription in [DeepSeek Harness](https://github.com/deepseek-ai/
 - browser image input through dsh's existing paste and drop controls
 - a per-conversation Fast Mode switch and compact weekly quota indicator in the Web composer
 - optional backend-authorized model recovery, including hidden Luna Reserve routing
-- a three-scope HTTP(S) proxy control for Codex-only or process-wide routing
+- legacy three-scope HTTP(S) proxy settings kept available through the existing API, CLI, and TUI configuration; saved values are preserved, not cleared automatically
 - built-in outbound-proxy node management with a bundled mihomo core: subscription import, latency test, automatic or pinned node selection, Codex-only by default or whole dsh, Windows x64
+- a `local_network_proxy` AI tool for status, enable, test, and node selection against the bundled proxy, so local shell commands can use its loopback URL
 
 ChatGPT subscription authentication and usage-based OpenAI API access are different products. This plugin uses the ChatGPT Codex backend only; it does not turn a subscription into a general-purpose OpenAI API credential.
 
@@ -77,13 +78,21 @@ Automatic model fallback is off by default. When enabled under **Settings → Op
 
 ## Model catalog
 
-The plugin reads the Codex CLI/Desktop `models_cache.json` to discover models not yet bundled by pi-ai and update their names, input modalities, reasoning levels, and default `context_window`. It checks the file specified by `DSH_CODEX_MODELS_CACHE`, then `CODEX_HOME/models_cache.json`, then `~/.codex/models_cache.json`. Only valid entries with `visibility: list` are imported; the maximum expandable window does not replace the default capacity.
+The picker reads the account's official Codex catalog from the internal ChatGPT endpoint `https://chatgpt.com/backend-api/codex/models?client_version=0.165.0`. The version is the official client version this parser was verified against; it does not mean the plugin implements every capability of that release, and it is not the public `/v1/models` API. The origin is fixed, redirects are refused, and the response can never retarget it.
 
-Codex CLI/Desktop refreshes this cache. Catalog discovery reads model metadata only and does not launch a Codex subprocess. OAuth login remains separate unless `credentialFile` is explicitly configured (see below). After updating and opening Codex, reopen the plugin's model settings or refresh the model list to discover changes. Missing, corrupt, or partially written caches retain the last usable catalog; a fresh start without a cache uses bundled models, including GPT-6 Astra, Sol, and Luna. Catalog metadata does not guarantee model access for the account signed into dsh.
+Opening **Settings → OpenAI Codex** first restores the persisted snapshot for the signed-in account, then applies a 300-second TTL: a fresh snapshot answers without a request, while an expired or missing one triggers one bounded refresh (20-second timeout) before the answer. **Refresh from OpenAI** forces a refresh and skips the TTL; the plugin also refreshes in the background at startup and after a completed sign-in. Ordinary chat turns never wait on this network work.
 
-Saved model selections are preserved. Enable newly discovered models in the settings below; a temporarily unavailable cache does not delete saved model IDs. Newly discovered models without bundled pricing use a zero cost estimate, which does not mean the model is free.
+Only successfully fetched official entries with `visibility: list` are authoritative. When no usable official snapshot exists for the signed-in account, the plugin falls back to the existing Codex `models_cache.json` metadata (`DSH_CODEX_MODELS_CACHE`, then `CODEX_HOME/models_cache.json`, then `~/.codex/models_cache.json`), and finally to bundled models including GPT-6 Astra, Sol, Luna, and Terra. A failed refresh keeps the last successful same-account official snapshot and prefers it over the fallback sources, so fallback metadata applies only when that snapshot is missing. A Codex cache file can add transport templates but never overrides official metadata; the plugin does not launch a Codex subprocess or read Codex credentials.
 
-By default, the model picker advertises the complete `openai-codex` catalog. Open **Settings → OpenAI Codex** and use the model checkboxes to choose which entries remain visible. The selection is live and durable; dsh refreshes the Web and TUI model directories after it changes.
+The plugin keeps its own catalog cache at `<credential file>.models-cache.json` beside the plugin credential document, written with POSIX mode 0600. It stores only the fields this plugin converts (slug, display name, visibility, default context window, input modalities, reasoning levels) plus a SHA-256 account hash and the fetch time. Access tokens, the ChatGPT account id, response headers, tool policy, and other response metadata are never written. A cache written by another account is ignored, and switching or signing out drops the previous account's catalog. Restoring the snapshot uses the locally stored identity and never refreshes the token, so an expired session that is offline still sees its last successful catalog; an actual refresh resolves the credential through the provider-native OAuth lifecycle instead.
+
+A failed refresh keeps the last successful same-account snapshot and exposes only a fixed, sanitized reason. Non-forced reads wait 60 seconds after a failure before retrying; the manual refresh button retries immediately. The settings page keeps the current list on failure and adds a localized explanation; provider text, status codes, and response bodies are never shown.
+
+Saved model selections are preserved; a refresh replaces the candidate list, keeps already saved model IDs, and leaves newly discovered models unchecked. Models that disappear from the official list and the Codex cache keep their transport metadata only for the current process so resumed sessions can still resolve them; across a restart, resolution still depends on the bundled catalog, the current Codex cache, or the official catalog, so permanent resolution of arbitrary historical models is not promised. Discovered models without bundled pricing use a zero cost estimate, which does not mean the model is free. The `ultra` reasoning level remains unsupported because the current pi-ai `ThinkingLevel` type boundary does not include it. Catalog metadata does not guarantee that the signed-in account may use a model.
+
+The initial checkbox selection is seeded from the catalog available when the provider is initialized (bundled models plus any existing Codex cache). An official list loaded later updates the candidates but does not automatically check newly discovered models, so they stay unchecked until you enable them. Open **Settings → OpenAI Codex** and use the model checkboxes to choose which entries remain visible. The selection is live and durable; dsh refreshes the Web and TUI model directories after it changes.
+
+This dynamic catalog exists in the current source checkout. The published `v0.3.3-standalone.3` release asset does not include it, and the version number and release status are unchanged; using the refresh control requires rebuilding the host from this source and restarting it.
 
 The same initial subset can be seeded through `models` on the `llm-openai-codex` entry while preserving provider order:
 
@@ -113,7 +122,9 @@ This mirrors Codex CLI's `model_context_window` concept on the Harness side; no 
 
 ## Network proxy
 
-Open **Settings → OpenAI Codex → Network proxy** to select one of three scopes:
+The Web UI network-proxy entry now only exposes the bundled proxy (see [Bundled proxy nodes](#bundled-proxy-nodes)): subscription import, node latency tests, enable/disable, and the Codex-only or whole-dsh scope.
+
+The earlier three-scope HTTP(S) proxy settings remain supported through the existing plugin API, CLI, and TUI configuration for compatibility. They are not removed by this build, and existing saved values are preserved rather than cleared or migrated automatically:
 
 - **Follow dsh** leaves networking untouched. Codex inherits any process-wide proxy configured when dsh started.
 - **Codex only** applies the selected proxy to Codex model SSE requests, native compaction, standalone search, image generation, quota reads, and OAuth login and refresh started from Settings or TUI. WebSocket transport and standalone CLI login follow the process policy.
@@ -131,6 +142,21 @@ The bundle also ships the `dsh-net-proxy` node manager: a mihomo core and geodat
 - **Platform.** The bundled core is Windows x64 only; the plugin code itself is platform-neutral.
 - **Do not enable both.** Do not enable this built-in proxy and the standalone `dsh-net-proxy` plugin at the same time: both would start their own core and compete for the same local state and port.
 - The bundled core and geodata keep their own licenses; third-party notices and the SHA-256 of the shipped bytes are in [docs/third-party-notices.md](docs/third-party-notices.md).
+
+## AI control of the local proxy
+
+The `local_network_proxy` tool lets an agent inspect and drive the bundled proxy without opening Settings. It has four actions:
+
+- `status` — read-only: reports `enabled`, `scope`, readiness, kernel status, routing, the fixed/current node, node counts, and the current loopback `proxyUrl` (for example `http://127.0.0.1:<port>`) when ready. It starts no core and measures nothing.
+- `enable` — starts the proxy for the Codex-only scope and returns only after the kernel is actually running with a listen port. It never changes scope: an already-running `Whole dsh` proxy is reused as-is; if scope is `global` and the proxy is off, enabling is refused instead of taking over host networking.
+- `test` — measures only the proxy's configured targets and reports usable nodes. An ordinary test keeps the current fixed node; `auto_select=true` clears the pin first so the fastest node can be chosen automatically. Tests share one serialized sweep with the Settings page, so a second overlapping test fails with a busy message.
+- `select` — pins an exact node name from the latest status/test result, or `"auto"` to clear the pin and return to automatic selection. Only `auto` (or `test` with `auto_select=true`) clears a pin; if the switch fails, the previous pin is restored.
+
+The returned URL is a loopback HTTP proxy on the machine that runs dsh. Use it explicitly, for example `git -c http.proxy=http://127.0.0.1:<port> clone ...`, `curl --proxy http://127.0.0.1:<port> ...`, or per-command `HTTPS_PROXY`/`HTTP_PROXY` for `npm install`. On a Remote SSH session `127.0.0.1` is the remote host, not the dsh machine; do not use the address there unless that host itself exposes the same proxy. `web_fetch` is not guaranteed to honor an explicit proxy, so do not promise it will.
+
+The tool never changes the selected scope, never replays model or business requests, and never returns subscription links, credentials, raw logs, or node error text. A failed probe or test is reported as a failure; it is not retried automatically and does not count as a successful connection.
+
+This source no longer creates or modifies the global `AGENTS.md` or `.AGENTS.md` rule files. The retired `writeMemory` field has no effect and cannot enable rule writing; agent-facing proxy instructions come only from the existing `local_network_proxy` tool, whose definition is unchanged. Existing global rule files are left as they are and are not edited or removed automatically. This change is not in the published `v0.3.3-standalone.3` asset, and a running host loads it after the next restart.
 
 ## Images
 
@@ -179,9 +205,11 @@ Affected users should follow the **[historical Session repair guide](docs/sessio
 The Settings page provides two Codex-only switches. Both are off by default:
 
 - **WebSocket context reuse** keeps `store: false` and selects pi-ai's Codex WebSocket continuation transport. While the same session keeps a reusable connection and the next request is an exact extension, it sends `previous_response_id` with only the new input. History edits, compaction, Fork, connection loss, and process restarts fall back to a full request. With the switch off, ordinary turns use SSE and always send the full Harness context.
-- **Native Responses compaction** follows Codex's current V2 flow: it sends the existing history plus a `compaction_trigger` item through `codex/responses`, retains recent client messages with the returned encrypted compaction item inside the Harness checkpoint, and restores those native items on later requests. Existing checkpoints remain readable after the switch is disabled. If V2 compaction is unavailable or fails, the same call falls back to the existing Harness model summary.
+- **Native Responses compaction** follows Codex's current V2 flow: it sends the existing history plus a `compaction_trigger` item through `codex/responses`, retains recent client messages with the returned encrypted compaction item inside the Harness checkpoint, and restores those native items on later requests. Before publishing that checkpoint, the plugin locally estimates the durable marker with the host token meter and a conservative 256-token frame margin, and uses it only when that estimate is strictly smaller than the source text it replaces. This is a conservative shrink check, not an exact token account of the opaque encrypted item. Without the meter or a usable source budget, or when the result is too large, the same call falls back to the ordinary Harness summary; the fallback can therefore add one native request before the summary. The core `dsh-compaction-basic` gate remains in force, the full retained payload is preserved (never truncated or stored out of band), and the 256-token margin tracks the verified current Harness checkpoint frame rather than promising compatibility with any runtime. Existing checkpoints remain readable after the switch is disabled. If V2 compaction is unavailable or fails, the same call falls back to the existing Harness model summary.
 
 The switches are independent. Every ordinary Codex request keeps `store: false`; the default uses SSE with the text-summary path from `dsh-compaction-basic`.
+
+A native checkpoint in chat history renders as the single label `Used Codex remote compaction` instead of its encrypted body; ordinary summaries, and histories without a complete native marker, keep their existing presentation. This is display-only: the persisted checkpoint, older logs, and request payloads are unchanged.
 
 ## Credentials and privacy
 

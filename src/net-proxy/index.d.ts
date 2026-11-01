@@ -71,6 +71,68 @@ export declare function setNetworkProxyScope(
 
 export declare function networkProxyCodexUrl(): string | undefined;
 
+// ── AI tool surface ─────────────────────────────────────────────────────────
+
+export interface NetworkProxyToolNode {
+  name: string;
+  status: string;
+  delay?: number | undefined;
+}
+
+export interface NetworkProxyToolStatus {
+  enabled: boolean;
+  scope: NetworkProxyScope;
+  ready: boolean;
+  proxyUrl?: string | undefined;
+  mixedPort?: number | undefined;
+  kernelStatus: string;
+  routing: { installed: boolean; via: string };
+  fixedNode: string;
+  fixedNodeAvailable: boolean;
+  current?: string | undefined;
+  group?: string | undefined;
+  alive: number;
+  total: number;
+  testing: boolean;
+  lastTestAt?: number | undefined;
+  busy?: string | undefined;
+  nodes: NetworkProxyToolNode[];
+}
+
+export interface NetworkProxyEnableResult {
+  started: boolean;
+  status: NetworkProxyToolStatus;
+}
+
+export interface NetworkProxyTestResult {
+  measured: { alive: number; total: number; aborted: boolean };
+  selected?: string | undefined;
+  autoSelected: boolean;
+  status: NetworkProxyToolStatus;
+}
+
+export interface NetworkProxySelectResult {
+  selected?: string | undefined;
+  fixedNode: string;
+  status: NetworkProxyToolStatus;
+}
+
+/** Read-only, privacy-trimmed status for the AI tool. */
+export declare function networkProxyToolStatus(): NetworkProxyToolStatus;
+
+/** Enable for Codex traffic and wait for real readiness (never global idle). */
+export declare function enableNetworkProxyForTool(): Promise<NetworkProxyEnableResult>;
+
+/** Measure configured targets and auto-select (no caller-provided targets). */
+export declare function testNetworkProxyForTool(options?: {
+  autoSelect?: boolean;
+}): Promise<NetworkProxyTestResult>;
+
+/** Pin one existing healthy node, or "auto" to clear the pin. */
+export declare function selectNetworkProxyNodeForTool(
+  node: string
+): Promise<NetworkProxySelectResult>;
+
 export declare function networkProxyOwnsGlobal(): boolean;
 
 // ── test seams (underscore-prefixed on purpose) ─────────────────────────────
@@ -89,7 +151,6 @@ export interface NetworkProxyInternalState {
     proxyModelCalls: boolean;
     bypass: string[];
     pinnedNode: string;
-    writeMemory: boolean;
     autoEnabled: boolean;
     subscriptionSeeded: boolean;
     [key: string]: unknown;
@@ -157,5 +218,3 @@ export declare function _installRouting(): Promise<boolean>;
 export declare function _uninstallRouting(): void;
 
 export declare function _normalizeScope(value: string): NetworkProxyScope;
-
-export declare function _writeAgentMemory(): string[];

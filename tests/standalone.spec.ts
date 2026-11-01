@@ -274,6 +274,9 @@ describe('standalone bundle composition', () => {
     )
 
     expect(composed.ctx.tools.get(OpenAICodex.IMAGEGEN_TOOL_NAME)).toBeDefined()
+    expect(
+      composed.ctx.tools.get(OpenAICodex.LOCAL_NETWORK_PROXY_TOOL_NAME)
+    ).toBeDefined()
 
     const shadowed = composed.agent.registrations.filter(
       (definition) => definition.name === OpenAICodex.READ_IMAGE_TOOL_NAME

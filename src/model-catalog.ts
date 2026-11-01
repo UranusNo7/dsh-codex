@@ -2,6 +2,11 @@ import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Api, Model, ThinkingLevelMap } from "@earendil-works/pi-ai";
+import type { OpenAICodexOfficialSnapshot } from "./model-catalog-remote.ts";
+
+/** Authoritative official catalog snapshot, when one is available. */
+export type OpenAICodexOfficialCatalogSource =
+  () => OpenAICodexOfficialSnapshot | undefined;
 
 /** Keep retired GPT generations out while allowing later and non-versioned routes. */
 export function isSupportedOpenAICodexModel(id: string): boolean {
@@ -93,15 +98,26 @@ export function mergeOpenAICodexModels(
   ];
 }
 
+interface CodexCacheState {
+  document?: unknown;
+}
+
 /** Reload changed metadata without invalidating in-flight request snapshots. */
 export class OpenAICodexModelCatalog {
   private signature: string | undefined;
+  private codex: CodexCacheState | undefined;
+  private mergedCodex: CodexCacheState | undefined;
+  private official: OpenAICodexOfficialSnapshot | undefined;
+  private hadOfficial = false;
+  private retained: readonly Model<Api>[] = [];
+  private retainedAccount: string | undefined;
   private current: readonly Model<Api>[];
   private readonly bundled: readonly Model<Api>[];
 
   constructor(
     bundled: readonly Model<Api>[],
-    private readonly filename = openAICodexModelsCachePath()
+    private readonly filename = openAICodexModelsCachePath(),
+    private readonly officialCatalog?: OpenAICodexOfficialCatalogSource
   ) {
     const available = bundled.filter((model) => isSupportedOpenAICodexModel(model.id));
     this.bundled = available.length === bundled.length ? bundled : available;
@@ -109,21 +125,93 @@ export class OpenAICodexModelCatalog {
   }
 
   getModels(): readonly Model<Api>[] {
+    const codex = this.readCodexCache();
+    const official = this.officialCatalog?.();
+    if (official?.accountHash !== this.retainedAccount) {
+      // Switching (or losing) the account must not inherit another account's
+      // discovered transport metadata.
+      this.retainedAccount = official?.accountHash;
+      this.retained = [];
+      this.mergedCodex = undefined;
+    }
+    if (codex === this.mergedCodex && official === this.official) return this.current;
+    this.mergedCodex = codex;
+    this.official = official;
+    let next = this.bundled;
+    if (codex.document !== undefined) {
+      const merged = mergeOpenAICodexModels(this.bundled, codex.document);
+      if (merged !== this.bundled) next = merged;
+    }
+    const baseline = next;
+    if (official !== undefined && official.models.length > 0) {
+      // A successful official catalog is authoritative: a Codex cache file can
+      // add transport templates but never overrides official metadata.
+      const merged = mergeOpenAICodexModels(baseline, { models: official.models });
+      if (merged !== baseline) next = merged;
+    }
+    if (this.retained.length > 0) {
+      // A later catalog can omit a model this account already used. Keep its
+      // transport metadata so resumed sessions still resolve; it stays out of
+      // the picker because advertising filters on the current official list.
+      const ids = new Set(next.map((model) => model.id));
+      const kept = this.retained.filter((model) => !ids.has(model.id));
+      if (kept.length > 0) next = [...next, ...kept];
+    }
+    if (official !== undefined) {
+      const baselineIds = new Set(baseline.map((model) => model.id));
+      this.retained = next.filter((model) => !baselineIds.has(model.id));
+    }
+    // An authoritative catalog that disappears (sign-out, account switch, or a
+    // cleared snapshot) must drop its models; an empty or unsupported Codex
+    // cache entry must not, which preserves the original fallback contract.
+    const droppedOfficial = official === undefined && this.hadOfficial;
+    this.hadOfficial = official !== undefined;
+    if (droppedOfficial || next !== this.bundled) this.current = next;
+    return this.current;
+  }
+
+  /** Picker-visible catalog: official list entries when one is authoritative. */
+  advertised(): readonly Model<Api>[] {
+    const models = this.getModels();
+    const official = this.official;
+    if (official === undefined) return models;
+    const visible = new Set(official.models.map((model) => model.slug));
+    return models.filter((model) => visible.has(model.id));
+  }
+
+  /** Which non-official source is currently supplying metadata. */
+  fallbackSource(): "codex-cache" | "bundled" {
+    return this.codex?.document === undefined ? "bundled" : "codex-cache";
+  }
+
+  private readCodexCache(): CodexCacheState {
+    const signature = this.codexSignature();
+    if (signature === this.signature && this.codex !== undefined) return this.codex;
+    this.signature = signature;
+    if (signature.startsWith("file:")) {
+      try {
+        const document: unknown = JSON.parse(readFileSync(this.filename, "utf8").replace(/^\uFEFF/, ""));
+        this.codex = { document };
+        return this.codex;
+      } catch {
+        // Interrupted writes keep the last successfully parsed document.
+      }
+    }
+    // Codex is optional: a missing, oversized, or unreadable file must not
+    // erase the last usable catalog. Try again when Codex replaces the file.
+    this.codex ??= {};
+    return this.codex;
+  }
+
+  private codexSignature(): string {
     try {
       const stat = statSync(this.filename);
-      if (!stat.isFile() || stat.size > 10 * 1024 * 1024) return this.current;
-      const signature = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
-      if (signature === this.signature) return this.current;
-      const document: unknown = JSON.parse(readFileSync(this.filename, "utf8").replace(/^\uFEFF/, ""));
-      const next = mergeOpenAICodexModels(this.bundled, document);
-      // A partial rewrite, unsupported schema, or empty response must not erase
-      // the last usable catalog. Try again when Codex replaces the file.
-      if (next !== this.bundled) this.current = next;
-      this.signature = signature;
-    } catch {
-      // Codex is optional. Missing, unreadable, and interrupted writes all
-      // fall back to the last good snapshot (initially the bundled catalog).
+      return !stat.isFile() || stat.size > 10 * 1024 * 1024
+        ? "invalid"
+        : `file:${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+    } catch (error: unknown) {
+      const code = (error as NodeJS.ErrnoException | null)?.code;
+      return code === "ENOENT" ? "missing" : "error";
     }
-    return this.current;
   }
 }

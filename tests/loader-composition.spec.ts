@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
@@ -11,18 +11,31 @@ import WebRuntime from '@deepseek-ai/dsh-web'
 import * as OpenAICodex from '../src/index.ts'
 
 let root: string | undefined
+let dshHome: string | undefined
 let context: Context | undefined
 
 afterEach(async () => {
+  // Dispose before the stubs disappear: the plugin's background catalog warm
+  // must never reach a real home or the real network.
   await context?.fiber.dispose()
   context = undefined
+  vi.unstubAllGlobals()
+  vi.unstubAllEnvs()
   if (root !== undefined) await rm(root, { recursive: true, force: true })
   root = undefined
+  if (dshHome !== undefined) await rm(dshHome, { recursive: true, force: true })
+  dshHome = undefined
 })
 
 describe('OpenAI Codex real composition', () => {
   it('loads through the Loader, exposes the catalog, and unregisters on disposal', async () => {
     root = await mkdtemp(join(tmpdir(), 'dsh-openai-codex-loader-'))
+    dshHome = await mkdtemp(join(tmpdir(), 'dsh-openai-codex-loader-home-'))
+    vi.stubEnv('DSH_HOME', dshHome)
+    // No credential exists in the isolated home, so the catalog warm must stay
+    // offline; any network attempt means the isolation broke.
+    const fetchMock = vi.fn(async () => { throw new Error('unexpected network access') })
+    vi.stubGlobal('fetch', fetchMock)
     const configPath = join(root, 'cordis.yml')
     await writeFile(configPath, [
       '- id: llm',
@@ -77,5 +90,6 @@ describe('OpenAI Codex real composition', () => {
     if (entry.fiber === undefined) throw new Error('OpenAI Codex plugin fiber missing')
     await entry.fiber.dispose()
     expect(ctx.llm.listProviders()).toEqual([])
+    expect(fetchMock).not.toHaveBeenCalled()
   })
 })

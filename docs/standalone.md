@@ -1,6 +1,6 @@
 # 一体化构建（standalone）：能力、验收与边界
 
-本文件说明 `0.3.3-standalone.3` 的定位、随包能力、已验证范围和尚未验证的部分。目标是**基础 dsh + 本插件**即可使用 Codex 订阅能力，不再安装 `dsh-custom-header` 或 `dsh-gpt-compat`。
+本文件说明 `0.3.3-standalone.3` 的定位、随包能力、已验证范围和尚未验证的部分。目标是**基础 dsh + 本插件**即可使用 Codex 订阅能力，不再安装 `dsh-custom-header` 或 `dsh-gpt-compat`。标注「源码，未发布」的小节描述当前 checkout 中尚未包含在已发布 `.3` 资源里的改动。
 
 ## 定位
 
@@ -15,11 +15,13 @@
 | 能力 | 源码职责 |
 | --- | --- |
 | `openai-codex` 路由、内置模型目录（含 `gpt-6.1-terra`）、OAuth 登录与刷新 | `src/index.ts`、`src/adapter.ts`、`src/model-catalog.ts`、`src/oauth-*.ts`、`src/store.ts` |
+| 官方动态模型目录（**源码，未发布**） | `src/model-catalog-remote.ts`、`src/model-catalog.ts`、`src/service.ts`、`src/auth-routes.ts`、`src/client/` |
 | Codex 独立搜索 | `src/search.ts`、`src/search-event.ts` |
 | 设置页与账号页接口 | `src/auth-routes.ts`、`src/client/` |
 | `read_image` 的 HTTP(S) 输入与 `imagegen` | `src/read-image-enhancement.ts`、`src/imagegen.ts`、`src/public-http.ts` |
-| 三态网络代理与保存时连通性测试 | `src/proxy.ts`、`src/auth-routes.ts` |
+| 三态网络代理与保存时连通性测试（旧 API/CLI/TUI 兼容；Web 入口现为内置网络代理） | `src/proxy.ts`、`src/auth-routes.ts` |
 | 内置出网代理节点管理（mihomo 内核 + geodata、订阅/测速/自动选节点、Codex-only/全局） | `src/net-proxy/index.js`、`bin/net-proxy/`、`cordis.patch.yml` |
+| AI 本地代理控制工具 `local_network_proxy`（status/enable/test/select） | `src/local-network-proxy-tool.ts`、`src/net-proxy/index.js` |
 | **仅 Codex 的冗余提权清理** | `src/tool-compat.ts`，由 `src/index.ts` 通过 `ctx.inject(['tools', 'sandboxPolicy'])` 挂载 |
 | bundle 组成补丁 | `cordis.patch.yml` |
 
@@ -30,6 +32,60 @@
 该档位。Codex `models_cache.json` 中该模型的新元数据（名称、输入模态、推理档位、默认
 `context_window`）会在加载后覆盖内置值。默认路由仍为 `gpt-5.6-sol`，本次目录补充不改变
 `0.3.3-standalone.2` 版本或发布物。
+
+### 官方动态模型目录（源码，未发布）
+
+- 目录来源固定为 ChatGPT 内部接口 `https://chatgpt.com/backend-api/codex/models?client_version=0.165.0`。
+  `0.165.0` 是解析器验证时对照的完整官方客户端版本，不代表插件实现该版本的全部能力，也不是公开的
+  `/v1/models` API。请求拒绝重定向，响应不能改写目标地址。
+- 刷新触发：插件启动和登录成功会在后台刷新；打开设置（`GET /plugins/dsh-openai-codex/models`）先恢复
+  持久快照，再按 300 秒 TTL 决定是否在返回前刷新；`POST /plugins/dsh-openai-codex/models/refresh` 强制
+  刷新。单次请求 20 秒超时，响应体按 4 MiB 流式上限截断并最多接受 200 个条目；失败后冷却 60 秒，
+  强制刷新不受冷却限制。
+- 缓存：插件在自身凭据文件旁写 `<credential file>.models-cache.json`（写入时请求 POSIX mode 0600），
+  只保存 slug、显示名、`visibility`、默认 `context_window`、输入模态与推理档位，以及账号 SHA-256 与
+  获取时间；不保存 token、ChatGPT 账号 ID、响应头或工具策略。读取时校验账号哈希，其他账号的快照会被
+  忽略；切换账号或退出登录会丢弃上一账号的目录。
+- 离线恢复只读取本地已保存身份、不刷新 token，因此过期 token 离线时仍能看到上次成功目录；真正的刷新通过
+  provider 原生 OAuth 生命周期（pi-ai `getAuth`）解析凭据。
+- 候选优先级：成功获取且 `visibility: list` 的官方条目为权威；刷新失败保留同一账号上次成功的官方快照并
+  优先于回退来源，没有可用快照时才回退既有 Codex `models_cache.json`
+  （`DSH_CODEX_MODELS_CACHE` → `CODEX_HOME/models_cache.json` → `~/.codex/models_cache.json`），最后回到
+  随包目录。Codex 缓存可以补充传输模板，但绝不覆盖官方元数据。失败时只回传固定的脱敏原因
+  `official-model-catalog-unavailable` / `official-model-catalog-unauthorized`。
+- 选择：刷新替换候选并保留已保存的 `models`，新模型默认不勾选；已保存但当前不可用的 ID 由后端保留。从官方
+  列表与 Codex 缓存中消失的非随包模型只会在同进程保留传输元数据以便已恢复会话仍可解析；跨重启仍依赖随包
+  目录、当前 Codex 缓存或官方目录，不承诺任意历史模型永久解析。无随包价格的新模型按 0 价格估算，不代表
+  免费；`ultra` 仍不支持。目录元数据不保证当前账号实际可用。
+- 设置页：模型选择区域新增双语「从 OpenAI 刷新」按钮，并显示来源与最后成功时间；失败时保留当前列表并显示
+  本地化说明，不展示原始错误正文。
+- 该能力只存在于当前源码 checkout，未包含在已发布的 `v0.3.3-standalone.3` 资源中；版本号与发布状态
+  未变。本地构建已完成，宿主未重启，当前 GUI 未做新功能运行态验收。
+- 测试：`tests/model-catalog-remote.spec.ts`（模拟远端）、`tests/model-catalog.spec.ts`、
+  `tests/service.spec.ts`、`tests/auth-routes.spec.ts`、`tests/openai-codex-settings.client.spec.tsx`。
+
+### 原生压缩安全预检与降级（源码，未发布）
+
+- 原生 V2 压缩结果不会无条件成为检查点：插件用 Host token meter 的同口径本地估算，要求
+  `estimate(marker) + 256 < sourceText 预算`（严格小于）才发布原生检查点。256 是已验证的当前 Harness
+  检查点 frame 保守余量，不承诺适配任意 runtime；该估算是保守收缩判断，不是对加密 compaction item
+  的真实 token 计量。
+- 缺少 token meter、没有有效源文本预算、估算异常/非有限或结果过大时，同一次调用回退普通 Harness
+  摘要；失败路径可能先产生一次 native 请求、再产生一次普通摘要。核心 `dsh-compaction-basic` 收缩 gate
+  保留；完整 retained/opaque 数据原样保留，不截断、不外置；旧 v1 marker 重放不变。
+- 源预算来自 Harness 原始 `GenerateOptions.messages` 的既有 text 块（去 system、去最后压缩指令，
+  不计 reasoning、tool-call 参数、image、file），不是转换后的 PiContext 文本。
+- 该改动仅存在于当前源码 checkout（不在已发布的 `v0.3.3-standalone.3` 中），未发布。本轮
+  已确认原生远端检查点真实落盘且后续请求正常（本会话 13:15 的 summary 含 native marker、
+  checkpoint/end 无 error、后续 provider 输入正常）；新标签的目视验收尚未进行。
+- 测试：`tests/codex-compaction.spec.ts`、`tests/response-runtime.spec.ts`（mock；用已核实的 core
+  frame 契约与同款 chars/4 estimator 复刻 gate，不加载真实 core 包）。
+- 聊天历史中的原生检查点只显示标签「已使用Codex远程压缩」（EN: `Used Codex remote compaction`），
+  不展示 opaque 正文；普通摘要或缺少完整 v1 marker 的历史保持 stock 原样。这是 client 展示层对
+  `compaction` 与 `manual-compaction` 两个 key 的遮蔽委托，持久检查点、旧日志与请求 payload 不变。
+  当前 Client 已确认这两个渲染入口注册并生效（priority -1，对应 stock `priority 0` 未激活）；未做
+  目视验收（Tabbit 不可用），不承诺一般 HMR。测试见
+  `tests/native-compaction-presentation.client.spec.tsx`。
 
 提权清理规则（失败即保留，fail-closed）：
 
@@ -42,11 +98,17 @@
 ## 内置出网代理
 
 - 随包内置 `dsh-net-proxy` 的节点管理：mihomo 内核与 geodata 位于 `bin/net-proxy/`，无需另装代理客户端。
-- 插件设置页负责订阅导入、节点测速、固定节点或自动选择最快节点，以及代理启停。
+- 插件设置页负责订阅导入、节点测速、固定节点或自动选择最快节点，以及代理启停；Web 入口现在只有内置网络代理。
+- AI 工具 `local_network_proxy`：`status` 只读（返回动态 loopback URL、就绪状态与节点摘要）；`enable` 仅按 Codex 范围启动并等待真正就绪，不改变 scope，scope=global 且代理关闭时拒绝启用；`test` 只测已配置目标，普通测速保留固定节点，`auto_select=true` 才清除固定节点，并与设置页测速共用串行保护；`select` 固定精确节点名或 `auto` 解除，切换失败恢复原固定节点。
+- 该工具不自动重放模型或业务请求，不返回订阅链接、凭据、原始日志或节点错误原文；返回的 loopback URL 在 Remote SSH 下指远端主机而非 dsh 机器，`web_fetch` 不保证支持显式代理。本地命令可用 `git -c http.proxy=...`、`curl --proxy` 或单命令 `HTTPS_PROXY`/`HTTP_PROXY`。
+- 旧的三态 HTTP(S) 代理配置仍通过既有 API、CLI 与 TUI 兼容，已保存值会保留，不会被自动清空或迁移。
 - 代理范围默认 **仅 Codex**，只影响 Codex 流量；可切换为 **整个 dsh**。
 - 内置内核仅支持 **Windows x64**；插件自身代码与平台无关。
 - **不要与独立的 `dsh-net-proxy` 插件同时启用**：两者会各自启动内核，并争用同一份本地状态与端口。
 - 内置内核与 geodata 的许可、来源与实际字节 SHA-256 见 [third-party-notices.md](./third-party-notices.md)。
+- 不再创建或修改全局 `AGENTS.md` / `.AGENTS.md` 规则文件；旧 `writeMemory` 配置已无效，不能启用规则写入。
+  面向 AI 代理的说明仅由既有 `local_network_proxy` 工具提供，工具定义未变；已有全局规则文件不会被自动编辑
+  或删除。该改动仅存在于当前源码（不在已发布的 `v0.3.3-standalone.3` 中），宿主需下次重启后加载。
 
 ## 验收矩阵
 
@@ -55,7 +117,8 @@
 | 一体化挂载（仅核心 + 本插件，无第三方插件） | `tests/standalone.spec.ts`：真实 `Context`、`ToolRuntime`、`SandboxPolicyService`、`SessionProjectionRuntime`、`SandboxedFileSystem`、`LlmRuntime`、`WebRuntime` | 通过 |
 | 模型目录 | 同上：`llm.listProviders()` 仅 `openai-codex`，`llm.listModels()` 含 `gpt-6-sol` 与内置 `gpt-6.1-terra`；`tests/model-catalog.spec.ts` 覆盖 Terra 的 500K 默认窗口与缓存元数据合并 | 通过 |
 | 独立搜索挂载 | 同上：真实 Web 注册表中的 `openai-codex` 搜索 provider | 通过 |
-| 账号／设置接口挂载 | 同上：记录 `webServer.register` 的 12 条路由，覆盖 auth、fast-mode、image-tools、response-api、context-window、models、model-fallback、proxy | 通过 |
+| 账号／设置接口挂载 | 同上：记录 `webServer.register` 的 13 条路由，覆盖 auth、fast-mode、image-tools、response-api、context-window、models、models/refresh、model-fallback、proxy | 通过 |
+| 官方动态模型目录（**源码，未发布**） | `tests/model-catalog-remote.spec.ts`、`tests/model-catalog.spec.ts`、`tests/service.spec.ts`、`tests/auth-routes.spec.ts`、`tests/openai-codex-settings.client.spec.tsx`：模拟端点，未使用真实账号 | 源码测试覆盖；未随 `.3` 发布 |
 | `imagegen` 与 `read_image` 增强 | 同上：`imagegen` 工具已注册；agent 作用域上出现带 `url` 参数的 `read_image` 影子定义 | 通过 |
 | 无第三方插件依赖 | 同上：`package.json` 的 dependencies／devDependencies／peerDependencies 均不含两个被取代插件；组合前后 `globalThis.fetch` 不变 | 通过 |
 | Codex 冗余提权清理（端到端） | 同上：真实工具执行后参数只剩业务字段 | 通过 |
@@ -81,7 +144,8 @@
 - 当前发布版本：`0.3.3-standalone.3`（GitHub 预发布，未发布 npm）。相对 `0.3.3-standalone.2`，
   本轮新增内置 mihomo 出网代理（含 `bin/net-proxy/` 内核与 geodata）、Codex-only/整个 DSH 两种 scope、
   代理测速与 controller 直连修复及对应测试/文档同步；`.2` 相对 `.1` 新增内置 `gpt-6.1-terra` 目录。
-  协议、默认模型与既有能力不变。
+  协议、默认模型与既有能力不变。当前源码 checkout 另含尚未发布的官方动态模型目录（见上文
+  「源码，未发布」小节）；它不改变 `0.3.3-standalone.3` 的发布内容、版本号或协议。
 
 ## 真实桌面基础 QA（历史记录：`0.3.3-standalone.1`，本会话）
 
@@ -105,6 +169,9 @@
   仍需在桌面端重启后确认。
 - 套餐资格、额度、模型可用性与后端行为由 OpenAI 控制，可能随时变化。
 - 提权清理只处理可证明冗余的请求，不会让模型获得额外权限，也不会替代 dsh 的审批流程。
+- **官方动态模型目录尚未做运行态验收**：本地构建已完成，宿主未重启，当前 GUI 未做新功能运行态验收；
+  新增实现未单独进行真实账号联调，最终测试已隔离身份并使用 mock。已发布的 `v0.3.3-standalone.3`
+  资源不包含该实现，使用刷新控件需要从当前源码重新构建并重启宿主。
 
 ## 安装
 

@@ -23,6 +23,7 @@ import { OpenAICodexFastModeToggle } from './OpenAICodexFastModeToggle.tsx'
 import type { OpenAICodexFastModeToggleInjected } from './OpenAICodexFastModeToggle.tsx'
 import { OpenAICodexQuotaIndicator } from './OpenAICodexQuotaIndicator.tsx'
 import type { OpenAICodexQuotaIndicatorInjected } from './OpenAICodexQuotaIndicator.tsx'
+import { installNativeCompactionPresentation } from './NativeCompactionPresentation.tsx'
 import { en, zh } from './locales.ts'
 import type { OpenAICodexSettingsKey } from './locales.ts'
 
@@ -43,6 +44,13 @@ export function apply(ctx: ClientContext): void {
   const namespace = 'settings.openai-codex'
   ctx.effect(() => ctx.locale.register(namespace, { zh, en }), 'dsh-openai-codex: settings copy')
   const t = ctx.locale.bind(namespace) as OpenAICodexSettingsInjected['t']
+  ctx.effect(
+    () => installNativeCompactionPresentation(
+      ctx.slots as unknown as Parameters<typeof installNativeCompactionPresentation>[0],
+      () => t('nativeCompactionLabel')
+    ),
+    'dsh-openai-codex: native compaction presentation'
+  )
   const imageUrls = new Map<string, Promise<string>>()
   const createdUrls = new Set<string>()
   const loadImage = (sessionId: SessionId, attachment: ImageAttachmentRef): Promise<string> => {

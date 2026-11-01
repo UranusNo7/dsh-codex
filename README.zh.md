@@ -9,7 +9,7 @@
 `dsh-codex` 是一个独立的 dsh bundle，提供：
 
 - 在 dsh 设置面板或独立 CLI 中完成 ChatGPT OAuth 登录，并自动刷新 token
-- Codex GPT 模型目录，包含内置 GPT-6.1 Terra（默认 500K 上下文，支持文本与图片输入）；账号提供视觉模型时自动声明其图片输入能力
+- 动态 Codex GPT 模型目录：从官方 Codex 接口按 300 秒 TTL 自动刷新，设置页可手动强制刷新；官方不可用时回退 Codex 应用缓存，再回退内置目录（含 GPT-6.1 Terra，默认 500K 上下文）
 - 可实时覆盖 dsh 用于上下文用量显示与压缩策略的客户端窗口容量
 - 经标准 LLM 服务运行的流式响应、工具调用、推理回放、提示词缓存与 dsh 压缩
 - 通过 dsh 现有 `web_search` 工具使用 Codex 独立联网搜索
@@ -18,8 +18,9 @@
 - 复用 dsh Web 输入框的粘贴和拖放图片能力
 - 在 Web 输入框提供按会话生效的 Fast Mode 开关与紧凑的每周额度指示器
 - 可选的后端授权模型恢复，包括隐藏的 Luna Reserve 路由
-- 可选择仅 Codex 或整个进程范围的三态 HTTP(S) 代理设置
+- 旧三态 HTTP(S) 代理设置继续通过既有 API、CLI 与 TUI 配置兼容；已保存值会保留，不会被自动清空
 - 内置出网代理节点管理：打包 mihomo 内核，支持订阅导入、节点测速、自动或固定节点，默认仅 Codex、可切换整个 dsh，仅 Windows x64
+- `local_network_proxy` AI 工具：对内置代理执行 status/enable/test/select，本地命令可用其 loopback 地址出网
 
 ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只使用 ChatGPT Codex 后端，不会把订阅转换成通用 OpenAI API 凭据。
 
@@ -77,13 +78,21 @@ bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`，并选择 Code
 
 ## 模型目录
 
-插件会读取 Codex CLI/Desktop 的 `models_cache.json`，补充 pi-ai 尚未收录的新模型，并使用缓存中的名称、输入能力、推理档位和默认 `context_window`。查找顺序为 `DSH_CODEX_MODELS_CACHE` 指定的文件、`CODEX_HOME/models_cache.json`、`~/.codex/models_cache.json`。只导入 `visibility: list` 的有效条目；缓存中声明的最大可扩展窗口不会自动替换默认容量。
+模型选择器从 ChatGPT 内部的官方 Codex 接口 `https://chatgpt.com/backend-api/codex/models?client_version=0.165.0` 读取当前账号的目录。该版本号只是本解析器验证时所对照的完整官方客户端版本，不代表插件实现了该版本的全部能力；它也不是公开的 `/v1/models` API。请求来源固定、拒绝重定向，响应无法改写目标地址。
 
-缓存由 Codex CLI/Desktop 刷新；模型发现只读取模型元数据，不依赖启动 Codex 子进程。除非显式配置 `credentialFile`（见下文），OAuth 登录仍相互独立。更新 Codex 并打开一次后，再打开插件模型设置或刷新模型列表即可发现变化。缓存缺失、损坏或正在写入时保留最近可用目录；首次启动没有缓存时使用随包目录（含 GPT-6 Astra、Sol 与 Luna）。目录元数据不保证当前 dsh 登录账号拥有相应模型权限。
+打开 **设置 → OpenAI Codex** 时，插件先恢复已登录账号的持久快照，再套用 300 秒 TTL：快照仍新鲜时直接返回、不发起请求；过期或缺失时在返回前执行一次有界刷新（20 秒超时）。**从 OpenAI 刷新** 会强制刷新并跳过 TTL；插件启动和登录成功也会在后台刷新。普通聊天回合不会等待这项网络工作。
 
-已保存的模型选择会保留。新增模型可以在下面的设置中启用；缓存暂时不可用不会删除已保存的模型 ID。新发现模型若没有随包价格信息，用量价格估算为 0，不能把它理解为该模型免费。
+只有成功获取且 `visibility: list` 的官方条目才是权威候选。当前账号没有可用官方快照时，插件才回退到既有的 Codex `models_cache.json` 元数据（依次为 `DSH_CODEX_MODELS_CACHE`、`CODEX_HOME/models_cache.json`、`~/.codex/models_cache.json`），最后回退到随包模型（含 GPT-6 Astra、Sol、Luna 与 Terra）。刷新失败会保留同一账号上次成功的官方快照，并优先于回退来源；只有该快照不存在时才使用回退元数据。Codex 缓存只能补充传输模板，绝不能覆盖官方元数据；插件不会启动 Codex 子进程，也不会读取 Codex 凭据。
 
-默认情况下，模型选择器会展示完整的 `openai-codex` 目录。打开 **设置 → OpenAI Codex**，通过模型复选框选择需要显示的条目。该选择实时生效并持久保存；修改后 dsh 会刷新 Web 与 TUI 的模型目录。
+插件在自身凭据文档旁维护独立缓存 `<credential file>.models-cache.json`（写入时请求 POSIX mode 0600），只保存本插件需要转换的字段（slug、显示名、可见性、默认上下文窗口、输入模态、推理档位）以及账号 SHA-256 哈希和获取时间。访问令牌、ChatGPT 账号 ID、响应头、工具策略与其他响应元数据都不会落盘。其他账号写入的缓存会被忽略；切换账号或退出登录会丢弃上一账号的目录。恢复快照只使用本地已保存的身份、不会刷新 token，因此离线且 token 已过期的会话仍能看到上次成功目录；真正的刷新则通过 Provider 原生 OAuth 生命周期解析凭据。
+
+刷新失败会保留同一账号上次成功的快照，只暴露固定的脱敏原因。非强制读取在失败后等待 60 秒再重试；手动刷新按钮会立即重试。设置页在失败时保留当前列表并显示本地化说明，绝不展示提供方原文、状态码或响应正文。
+
+已保存的模型选择会保留：刷新替换候选列表、保留已保存的模型 ID，新发现的模型默认不勾选。从官方列表与 Codex 缓存中消失的模型只会在当前进程内保留传输元数据，以便已恢复的会话仍可解析；跨重启后，解析仍依赖随包目录、当前 Codex 缓存或官方目录，因此不能承诺任意历史模型永久可解析。没有随包价格信息的新发现模型按 0 价格估算，这不代表模型免费。`ultra` 推理档位仍不支持，因为当前 pi-ai 的 `ThinkingLevel` 类型边界未包含它。目录元数据不保证当前登录账号真的拥有某个模型的使用权限。
+
+初始勾选来自 Provider 初始化时已可用的目录（随包模型加现有 Codex 缓存）。之后加载的官方列表更新候选，但不自动勾选新发现的模型，需要手动启用。打开 **设置 → OpenAI Codex**，通过复选框选择需要显示的条目；选择实时生效并持久保存，修改后 dsh 会刷新 Web 与 TUI 的模型目录。
+
+该动态目录能力存在于当前源码 checkout。已发布的 `v0.3.3-standalone.3` 资源不包含它，版本号与发布状态均未改变；使用刷新控件需要从该源码重新构建并重启宿主。
 
 也可以在 `llm-openai-codex` 条目上通过 `models` 设置初始子集，并保持提供方原有顺序：
 
@@ -113,7 +122,9 @@ bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`，并选择 Code
 
 ## 网络代理
 
-打开 **设置 → OpenAI Codex → 网络代理**，可以选择三种范围：
+Web 设置中的网络代理入口现在仅提供内置代理（见 [内置出网代理](#内置出网代理)）：订阅导入、节点测速、启停，以及仅 Codex 或整个 dsh 范围。
+
+旧的三态 HTTP(S) 代理设置仍通过既有插件 API、CLI 与 TUI 配置兼容，本次构建不会移除它们；已保存的值会保留，不会被自动清空或迁移：
 
 - **跟随 dsh** 不由插件覆盖网络设置；Codex 继承 dsh 启动时已经配置的进程级代理。
 - **仅 Codex** 把所选代理用于 Codex 模型 SSE 请求、原生压缩、独立搜索、生图、额度读取，以及从设置页或 TUI 发起的 OAuth 登录和刷新；WebSocket 与独立 CLI 登录仍遵循进程策略。
@@ -131,6 +142,21 @@ bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`，并选择 Code
 - **平台。** 内置内核仅支持 Windows x64；插件自身代码与平台无关。
 - **不要同时启用。** 不要与独立的 `dsh-net-proxy` 插件同时启用：两者会各自启动一个内核，并争用同一份本地状态与端口。
 - 内置内核与 geodata 各自保留原有许可；第三方声明与实际随包字节的 SHA-256 见 [docs/third-party-notices.md](docs/third-party-notices.md)。
+
+## AI 控制本地代理
+
+`local_network_proxy` 工具让 agent 无需打开设置页即可查询和驱动内置代理，包含四个动作：
+
+- `status` —— 只读：返回 `enabled`、`scope`、是否就绪、内核状态、routing、固定/当前节点、节点计数，以及就绪时的 loopback `proxyUrl`（例如 `http://127.0.0.1:<port>`）。不启动内核、不测速。
+- `enable` —— 以“仅 Codex”范围启动代理，并等到内核真正运行且已监听端口才返回。工具不会改变 scope：若用户已启用“整个 dsh”且代理在运行，则原样复用；若 scope 为 `global` 且代理关闭，则拒绝启用，不擅自接管宿主出网。
+- `test` —— 只测代理已配置的目标并返回可用节点；普通测速保持当前固定节点，`auto_select=true` 会先清除固定节点，让最快节点自动生效。测速与设置页共用同一串行扫描，已有测速进行中时本次调用会明确报 busy，不会并发启动第二次。
+- `select` —— 用最近一次 status/test 返回的精确节点名固定节点，或用 `"auto"` 清除固定并恢复自动选择。固定只由 `auto`（或 `test` 的 `auto_select=true`）解除；切换失败会恢复原固定节点。
+
+返回的 URL 是运行 dsh 的机器上的 loopback HTTP 代理。请显式使用，例如 `git -c http.proxy=http://127.0.0.1:<port> clone ...`、`curl --proxy http://127.0.0.1:<port> ...`，或为 `npm install` 单次设置 `HTTPS_PROXY`/`HTTP_PROXY`。在 Remote SSH 会话中 `127.0.0.1` 指远端主机而非 dsh 机器，除非远端自身也暴露同一代理，否则不要使用该地址。`web_fetch` 不保证支持显式代理，不要承诺可用。
+
+工具不会改变所选 scope、不会自动重放模型或业务请求，也不会返回订阅链接、凭据、原始日志或节点错误原文。探测或测速失败会按失败返回，不自动重试，也不代表连接成功。
+
+当前源码不再创建或修改全局 `AGENTS.md` 或 `.AGENTS.md` 规则文件。旧 `writeMemory` 字段已无效，不能启用规则写入；面向 AI 代理的说明仅由现有 `local_network_proxy` 工具提供，工具定义未改变。已有的全局规则文件保持原样，不会被自动编辑或删除。该改动不在已发布的 `v0.3.3-standalone.3` 资源中，运行中的宿主需在下次重启后加载。
 
 ## 图片
 
@@ -179,9 +205,11 @@ dsh-codex 0.3.0 不再写入已停用的 `web/openai-codex-search-llm-request` �
 设置页提供两个默认关闭、仅作用于 `openai-codex` 的开关：
 
 - **WebSocket 上下文复用**：保持 `store: false`，并选择 pi-ai 的 Codex WebSocket continuation 传输。同一会话继续复用连接，且下一轮与已有上下文严格衔接时，请求会通过 `previous_response_id` 只发送新增输入；历史改写、压缩、Fork、连接中断或进程重启后会自动发送完整上下文。关闭开关时，普通轮次使用 SSE，每次都发送 Harness 完整上下文。
-- **原生 Responses 压缩**：按 Codex 当前的 V2 流程，把现有历史和一个 `compaction_trigger` item 发给 `codex/responses`。近期客户端消息与返回的加密 compaction item 会一起保存在 Harness 检查点中，并在后续 Codex 请求发送前还原；关闭开关不会破坏已经生成的检查点。V2 压缩不可用或请求失败时，同一次调用会自动回退到原来的 Harness 模型摘要。
+- **原生 Responses 压缩**：按 Codex 当前的 V2 流程，把现有历史和一个 `compaction_trigger` item 发给 `codex/responses`。近期客户端消息与返回的加密 compaction item 会一起保存在 Harness 检查点中，并在后续 Codex 请求发送前还原。发布该检查点前，插件会用 Host token meter 对持久化标记做本地保守估算，并附加 256 token 的 frame 余量，只有估算严格小于被替换的源文本时才使用原生检查点；这是保守的收缩判断，不是对加密项的真实 token 计量。缺少 token meter、没有可用的源文本预算或结果过大时，同一次调用回退普通 Harness 摘要，因此失败路径可能先产生一次 native 请求再产生普通摘要。核心 `dsh-compaction-basic` 的收缩 gate 仍然保留，完整 retained 数据不会被截断或外置；256 余量对应已验证的当前 Harness 检查点 frame，不承诺适配任意 runtime。关闭开关不会破坏已经生成的检查点。V2 压缩不可用或请求失败时，同一次调用会自动回退到原来的 Harness 模型摘要。
 
 两个开关互相独立。所有普通 Codex 请求都保持 `store: false`；默认配置使用 SSE 和 `dsh-compaction-basic` 的文本摘要路径。
+
+聊天历史里的原生检查点只显示「已使用Codex远程压缩」标签，不展开或展示其加密正文；普通摘要、以及缺少完整原生标记的历史仍按原样显示。该行为只作用于展示层：持久检查点、旧日志与请求 payload 均不改变。
 
 ## 凭据与隐私
 

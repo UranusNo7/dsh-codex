@@ -138,8 +138,6 @@ const DEFAULT_CONFIG = {
   bypass: ['localhost', '127.0.0.1', '::1', '[::1]'],
   proxyModelCalls: false,
   pinnedNode: 'auto',
-  /** Write the agent-memory section on install. Set false to leave AGENTS.md alone. */
-  writeMemory: true,
   /** Set once the first-run steps have happened, so they never repeat. */
   autoEnabled: false,
   subscriptionSeeded: false,
@@ -1350,126 +1348,6 @@ async function reconcileScopeRouting() {
   return true;
 }
 
-// ── agent memory ─────────────────────────────────────────────────────────────
-
-/**
- * Marker that records "this plugin has already taught the agent about itself".
- *
- * It is used purely as a presence check. Nothing here ever searches for a
- * section, truncates a file, or rewrites what is already there — an earlier
- * version tried to keep its own section updated in place, and the parsing was
- * fragile enough to eat a neighbouring section once. Never touching existing
- * bytes is a rule worth more than a tidy file.
- *
- * The standalone plugin used `<!-- dsh-net-proxy:begin -->`; that marker (and
- * the hand-written heading) still counts as "already taught", so an upgrade
- * never appends a second section next to the old one.
- */
-const MEMORY_MARKER = '<!-- dsh-codex-network-proxy:begin -->';
-const LEGACY_MEMORY_MARKER = '<!-- dsh-net-proxy:begin -->';
-
-/**
- * Teach the agent that the built-in network proxy exists.
- *
- * The agent cannot use a proxy it does not know about: without this it tries to
- * reach GitHub directly, fails, and reports the network as broken. Install-time
- * is the right moment, because every later session then starts out knowing.
- *
- * WRITE-ONLY-IF-ABSENT. If a marker (current or legacy) appears anywhere in the
- * file, this does nothing at all. That makes a second run a guaranteed no-op,
- * and means a file the user has since edited by hand is never disturbed.
- *
- * The instructions carry the dsh-codex API prefix, both scopes, and the settings
- * entry. The subscription link is never part of them, and the proxy does not
- * echo it back from status or logs.
- *
- * @returns the file names actually written, for the log line.
- */
-function writeAgentMemory() {
-  if (state.config.writeMemory === false) return [];
-
-  const section = [
-    MEMORY_MARKER,
-    '## 出网代理：dsh-codex 内置网络代理（mihomo），需要上外网时自己开',
-    '',
-    '本 bundle 内置 mihomo 内核，自己实测各节点对 **GitHub** 的延迟并选用最快的，失败自动冷却切换。',
-    '**不依赖任何第三方代理客户端，也不需要开系统代理。**',
-    '',
-    '界面入口：DSH **设置 → 网络代理**（dsh-codex 插件页），可启停、切节点、重测速、看日志、切换范围。',
-    '',
-    '### 开机状态：默认关闭，需要上外网时自己开',
-    '',
-    '每次启动都是**关闭**的（不预热内核、不下载订阅）。要用外网就自己开，**不要问用户**：',
-    '',
-    '```powershell',
-    '# 开（约 2 秒就绪：起内核 → 实测各节点对 GitHub 的延迟 → 选最快；默认只代理 Codex 模型流量）',
-    'Invoke-RestMethod -Method Post -Uri \'http://127.0.0.1:19387/plugins/dsh-openai-codex/network-proxy/enabled\' -ContentType \'application/json\' -Body \'{"enabled":true}\'',
-    '',
-    '# 查状态：enabled / scope / kernel.status / routing / current / nodes / lastError',
-    'Invoke-RestMethod \'http://127.0.0.1:19387/plugins/dsh-openai-codex/network-proxy/status\'',
-    '',
-    '# 关',
-    'Invoke-RestMethod -Method Post -Uri \'http://127.0.0.1:19387/plugins/dsh-openai-codex/network-proxy/enabled\' -ContentType \'application/json\' -Body \'{"enabled":false}\'',
-    '```',
-    '',
-    '其他接口（全部在 `/plugins/dsh-openai-codex/network-proxy` 前缀下）：`POST .../test`（重新测速）、`POST .../select`（`{"node":"auto"}` 恢复自动选节点）、`POST .../refresh`（更新订阅）、`POST .../scope`（切换范围）。',
-    '',
-    '### 范围（scope）',
-    '',
-    '- 默认 `scope=codex`：只让 Codex 模型请求走代理，**不改**宿主进程的全局 dispatcher、代理环境变量或子进程出网。',
-    '- `scope=global`：整个 DSH 出网都走代理（含 `*.deepseek.com` 模型流量），退出/关闭时精确还原宿主原有代理设置。',
-    '- 切换：`POST /plugins/dsh-openai-codex/network-proxy/scope`，body `{"scope":"codex"}` 或 `{"scope":"global"}`。',
-    '',
-    '### 什么时候该自己开',
-    '',
-    '判断标准：**要访问被墙的站点（GitHub / Google / raw.githubusercontent 等）就先开。**',
-    '',
-    '- `web_fetch` / `web_search` 失败、超时、连接被重置',
-    '- 要 `git clone` / `npm install` 拉 GitHub 上的东西',
-    '- 用户说"打不开""连不上""下载失败"，而目标是境外站点',
-    '',
-    '反过来，**只做本机操作**（读写本地文件、跑本地脚本、分析工作区）**不要开** —— 没必要，还白占内存。',
-    '',
-    '### 开启后的实际效果',
-    '',
-    '- 出口 IP 变成节点所在地（日本/台湾/新加坡/美国等），不再是本地运营商',
-    '- `scope=codex` 只影响 Codex 模型请求；`scope=global` 才会给进程设置 `HTTP(S)_PROXY` 与 `NODE_USE_ENV_PROXY=1`，让子进程（`git`、`npm`、`curl`）也走代理',
-    '- **loopback 永远直连**（`localhost` / `127.0.0.0/8` / `::1`），DSH 自己的 Web UI 和内置内核 controller 不会被绕进代理',
-    '',
-    '### 注意',
-    '',
-    '- **不要**让用户去开 Clash Mi 之类的客户端 —— 内核与规则库随 dsh-codex 打包在 `bin/net-proxy/`',
-    '- 订阅链接只保存在本地配置中，`GET /status`、接口响应与日志都**不回显**订阅 URL',
-    '- 实现位于 dsh-codex 的 `src/net-proxy/`；改代码之前先读该目录的注释与 `licenses/` 说明',
-    '<!-- /dsh-codex-network-proxy -->',
-    '',
-  ].join('\n');
-
-  // Only `AGENTS.md`: it is the documented name, and it is the file DSH actually
-  // loads here. An earlier version also wrote a `.AGENTS.md` sibling "for
-  // compatibility", which just created a second copy of the same text in the
-  // user's home directory for no benefit.
-  const file = join(dshHome(), 'AGENTS.md');
-  try {
-    const existing = existsSync(file) ? readFileSync(file, 'utf8') : '';
-    // Marker (current or legacy), or a section a human already wrote by hand.
-    // Either way the agent has been taught, and appending again would only
-    // duplicate it; never rewrite bytes we did not author this run.
-    if (
-      existing.includes(MEMORY_MARKER) ||
-      existing.includes(LEGACY_MEMORY_MARKER) ||
-      /^##\s*(?:\d+\.\s*)?出网代理/m.test(existing)
-    ) return [];
-    mkdirSync(dshHome(), { recursive: true });
-    const prefix = existing.trim() === '' ? '# 全局工作偏好（对所有会话生效）\n\n' : `${existing.trimEnd()}\n\n---\n\n`;
-    writeFileSync(file, `${prefix}${section}`, 'utf8');
-    return ['AGENTS.md'];
-  } catch (error) {
-    log(`写入 AGENTS.md 失败（忽略）：${error?.message ?? error}`);
-    return [];
-  }
-}
-
 // ── orchestration ────────────────────────────────────────────────────────────
 
 /**
@@ -1599,6 +1477,206 @@ function snapshot() {
   };
 }
 
+// ── AI tool surface ──────────────────────────────────────────────────────────
+
+/** True when the bundled proxy can actually serve the loopback URL right now. */
+const networkProxyReady = () =>
+  state.config.enabled && state.kernel.status === 'running' && state.config.mixedPort > 0;
+
+/**
+ * Read-only status for the AI tool.
+ *
+ * Deliberately trimmed: no subscription URL, no kernel log or install path, no
+ * raw node errors, and no state.lastError. The tool can say whether a node is
+ * usable without echoing provider data or log text.
+ */
+export function networkProxyToolStatus() {
+  const ready = networkProxyReady();
+  return {
+    enabled: state.config.enabled,
+    scope: getNetworkProxyScope(),
+    ready,
+    proxyUrl: ready ? proxyUrl() : undefined,
+    mixedPort: state.config.mixedPort > 0 ? state.config.mixedPort : undefined,
+    kernelStatus: state.kernel.status,
+    routing: { installed: state.routing.installed, via: state.routing.via },
+    fixedNode: state.config.pinnedNode ?? 'auto',
+    fixedNodeAvailable: state.config.pinnedNode === undefined
+      || state.config.pinnedNode === 'auto'
+      || state.nodes.some((n) => n.name === state.config.pinnedNode),
+    current: state.current,
+    group: state.group,
+    alive: state.nodes.filter((n) => n.status === 'ok').length,
+    total: state.nodes.length,
+    testing: state.testing,
+    lastTestAt: state.lastTestAt,
+    busy: state.busy,
+    nodes: state.nodes.map((n) => ({ name: n.name, status: n.status, delay: n.delay })),
+  };
+}
+
+/** Why enabling failed, translated into one fixed actionable sentence. */
+function networkProxyEnableHint() {
+  switch (state.kernel.status) {
+    case 'unconfigured':
+      return '尚未配置订阅。请让用户在 设置 → 网络代理 填写订阅链接并点击“更新订阅”后重试。';
+    case 'missing':
+      return '随包 mihomo 内核缺失。请重新安装完整的 dsh-codex 发布包后重试。';
+    case 'failed':
+      return '内核启动失败。请让用户在 设置 → 网络代理 检查内核状态（订阅与节点是否正确）后重试。';
+    case 'starting':
+      return '内核仍在启动。请稍后重试 status。';
+    default:
+      return '代理未就绪。请让用户在 设置 → 网络代理 检查订阅与内核状态后重试。';
+  }
+}
+
+/** Tool wording for "whole-DSH scope exists but the proxy is not running". */
+const NETWORK_PROXY_GLOBAL_IDLE_MESSAGE =
+  '当前代理范围是“整个 DSH”且代理未启用。AI 工具不会擅自启用全局代理；请让用户在 设置 → 网络代理 中启用，或切换为“仅 Codex”后重试。';
+
+/**
+ * Enable the bundled proxy for Codex traffic and wait for real readiness.
+ *
+ * Never enables a "global" scope the user has not already turned on. When the
+ * proxy is already running, both scopes are reused as-is; the tool never changes
+ * scope, dispatcher ownership, or proxy environment.
+ */
+export async function enableNetworkProxyForTool() {
+  if (networkProxyReady()) return { started: false, status: networkProxyToolStatus() };
+  if (getNetworkProxyScope() === 'global') throw new Error(NETWORK_PROXY_GLOBAL_IDLE_MESSAGE);
+  try {
+    await serialize(async () => {
+      if (networkProxyReady()) return;
+      await enableProxy();
+    });
+  } catch {
+    throw new Error(`本机代理未能启用：${networkProxyEnableHint()}`);
+  }
+  const status = networkProxyToolStatus();
+  if (!status.ready) throw new Error(`本机代理未能启用：${networkProxyEnableHint()}`);
+  return { started: true, status };
+}
+
+/** Busy message shared by the AI tool and the settings measurement route. */
+const NETWORK_PROXY_TEST_BUSY_MESSAGE = '已有测速在进行中，请稍后重试；未启动第二次测速。';
+
+/**
+ * Synchronous gate for "a measurement request owns the queue".
+ *
+ * Acquired BEFORE queueing on the lifecycle chain, so a second request fails
+ * immediately with the busy message instead of waiting for the first sweep to
+ * finish and then starting another one. Released in `finally`.
+ */
+let testRequestPending = false;
+function beginTestRequest() {
+  if (testRequestPending || state.testing) throw new Error(NETWORK_PROXY_TEST_BUSY_MESSAGE);
+  testRequestPending = true;
+}
+function endTestRequest() {
+  testRequestPending = false;
+}
+
+/**
+ * Run one measurement sweep through the shared lifecycle chain.
+ *
+ * Used by both the AI tool path and the settings `POST /test` route. The
+ * synchronous gate rejects the second request up front; the in-body check still
+ * covers a sweep that enable started in the background on its own.
+ */
+async function runGuardedTest(body) {
+  beginTestRequest();
+  try {
+    return await serialize(async () => {
+      if (state.testing) throw new Error(NETWORK_PROXY_TEST_BUSY_MESSAGE);
+      return await body();
+    });
+  } finally {
+    endTestRequest();
+  }
+}
+
+/** Exclusively measure configured targets (used by the settings route). */
+async function runExclusiveTest({ targets } = {}) {
+  return await runGuardedTest(() => runtime.testAllNodes({ targets }));
+}
+
+/**
+ * Measure nodes and let the existing selector pick the fastest one.
+ *
+ * Measurement targets always come from the saved proxy configuration; the tool
+ * cannot introduce new network targets. Readiness, the busy gate, the optional
+ * pin change, and the sweep share one transaction.
+ */
+export async function testNetworkProxyForTool({ autoSelect = false } = {}) {
+  if (!networkProxyReady()) await enableNetworkProxyForTool();
+  const measured = await runGuardedTest(async () => {
+    if (!networkProxyReady()) throw new Error(`本机代理未就绪：${networkProxyEnableHint()}`);
+    if (autoSelect === true) {
+      state.config.pinnedNode = 'auto';
+      persist();
+    }
+    try {
+      return await runtime.testAllNodes();
+    } catch {
+      throw new Error('测速失败：请稍后重试；若持续失败，请让用户检查订阅与内核状态。');
+    }
+  });
+  const status = networkProxyToolStatus();
+  return {
+    measured: {
+      alive: measured?.alive ?? status.alive,
+      total: measured?.total ?? status.total,
+      aborted: measured?.aborted === true,
+    },
+    selected: state.current,
+    autoSelected: status.fixedNode === 'auto',
+    status,
+  };
+}
+
+/**
+ * Pin one existing node, or return to automatic selection.
+ *
+ * `"auto"` is the only way to clear a pin; ordinary selections never silently
+ * remove the user's fixed node. The pin change and the switch share one
+ * serialized transaction, so a failed switch restores the previous pin instead
+ * of leaving a new one persisted. Requires an already-running proxy (reusing the
+ * global scope when the user enabled it), and never changes the scope.
+ */
+export async function selectNetworkProxyNodeForTool(node) {
+  if (typeof node !== 'string' || node.trim() === '') throw new Error('node 必须是非空节点名或 "auto"');
+  if (!networkProxyReady()) {
+    if (getNetworkProxyScope() === 'global') throw new Error(NETWORK_PROXY_GLOBAL_IDLE_MESSAGE);
+    throw new Error('本机代理尚未启用：请先调用 action="test"（会按需启用并测速）或 action="enable"。');
+  }
+  const name = node.trim();
+  return await serialize(async () => {
+    if (!networkProxyReady()) throw new Error('本机代理未就绪：请先调用 action="status" 或 action="test"。');
+    if (name === 'auto') {
+      state.config.pinnedNode = 'auto';
+      persist();
+      await runtime.selectBest();
+    } else {
+      if (!state.nodes.some((n) => n.name === name)) {
+        throw new Error(`未知节点「${name.slice(0, 80)}」：请先调用 action="test" 获取当前节点列表。`);
+      }
+      const previous = state.config.pinnedNode;
+      state.config.pinnedNode = name;
+      persist();
+      try {
+        await runtime.switchTo(name, 'AI 指定');
+      } catch {
+        state.config.pinnedNode = previous;
+        persist();
+        throw new Error('切换节点失败，已保留原固定节点设置；请先调用 action="test" 刷新节点后重试。');
+      }
+    }
+    const status = networkProxyToolStatus();
+    return { selected: state.current, fixedNode: status.fixedNode, status };
+  });
+}
+
 // ── plugin body ──────────────────────────────────────────────────────────────
 
 export function apply(ctx, config = {}) {
@@ -1618,15 +1696,6 @@ export function apply(ctx, config = {}) {
   // Adopt the subscription an installed client already has, so the first run
   // needs no typing. This only records a URL — it starts nothing.
   seedSubscriptionFromLocalClient();
-
-  // Teach the agent this plugin exists, once. Install-time, not boot-time, and
-  // idempotent, so it never touches a file the user has since edited.
-  try {
-    const written = writeAgentMemory();
-    if (written.length > 0) log(`已把用法写入记忆：${written.join(', ')}（下次会话的 Agent 会自动知道有这个插件）`);
-  } catch (error) {
-    log(`写入记忆失败（忽略）：${error?.message ?? error}`);
-  }
 
   persist();
 
@@ -1737,7 +1806,7 @@ export function apply(ctx, config = {}) {
     return { ...result, status: snapshot() };
   });
 
-  post('/test', async ({ targets } = {}) => ({ ...await runtime.testAllNodes({ targets }), status: snapshot() }));
+  post('/test', async ({ targets } = {}) => ({ ...await runExclusiveTest({ targets }), status: snapshot() }));
 
   post('/select', async ({ node }) => {
     if (node === undefined || node === 'auto') {
@@ -1859,6 +1928,7 @@ const runtime = {
   stopKernel,
   testAllNodes,
   selectBest,
+  switchTo,
   installScopeRouting,
   uninstallScopeRouting,
   refreshSubscription,
@@ -1898,5 +1968,4 @@ export {
   findKernel as _findKernel,
   resolvePackageRoot as _resolvePackageRoot,
   normalizeScope as _normalizeScope,
-  writeAgentMemory as _writeAgentMemory,
 };

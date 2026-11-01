@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -154,7 +154,6 @@ function resetState(): void {
     bypass: ["localhost", "127.0.0.1", "::1", "[::1]"],
     proxyModelCalls: false,
     pinnedNode: "auto",
-    writeMemory: false,
     autoEnabled: false,
     subscriptionSeeded: false,
   };
@@ -423,7 +422,6 @@ describe("enable flows", () => {
       status: "ok",
       delay: 120,
       failCount: 0,
-      cooldownUntil: 0,
       cooldownMs: 0,
     };
     netProxy._state.nodes = [node as typeof netProxy._state.nodes[number]];
@@ -479,42 +477,383 @@ describe("enable flows", () => {
   });
 });
 
-describe("agent memory instructions", () => {
-  it("writes the embedded proxy API, scope contract, and settings entry once", () => {
-    netProxy._state.config.writeMemory = true;
-    const file = join(home, "AGENTS.md");
+describe("apply leaves agent instructions untouched", () => {
+  const agentsFile = () => join(home, "AGENTS.md");
 
-    expect(netProxy._writeAgentMemory()).toEqual(["AGENTS.md"]);
-    const text = readFileSync(file, "utf8");
-    expect(text).toContain("<!-- dsh-codex-network-proxy:begin -->");
-    expect(text).toContain("<!-- /dsh-codex-network-proxy -->");
-    expect(text).toContain("/plugins/dsh-openai-codex/network-proxy/enabled");
-    expect(text).toContain("设置 → 网络代理");
-    expect(text).toContain("scope=codex");
-    expect(text).toContain("scope=global");
-    expect(text).toContain("整个 DSH");
-    expect(text).not.toContain("/dsh-net-proxy/");
+  function loadAndDispose(config?: Record<string, unknown>): void {
+    const { ctx, dispose } = fakeContext();
+    try {
+      netProxy.apply(ctx, config);
+    } finally {
+      dispose();
+    }
+  }
+
+  it("does not create AGENTS.md when the plugin loads", () => {
+    loadAndDispose();
+    expect(() => readFileSync(agentsFile(), "utf8")).toThrow();
+    expect(() => readFileSync(join(home, ".AGENTS.md"), "utf8")).toThrow();
+  });
+
+  it("keeps hand-written instructions byte-for-byte", () => {
+    // UTF-8 BOM plus CRLF is what a Windows editor produces; the legacy
+    // `.AGENTS.md` sibling must also survive untouched.
+    const fixture = Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from("# 全局工作偏好（对所有会话生效）\r\n\r\n- 本机只用 pnpm\r\n", "utf8"),
+    ]);
+    const legacy = Buffer.from("# 旧版说明\r\n", "utf8");
+    writeFileSync(agentsFile(), fixture);
+    writeFileSync(join(home, ".AGENTS.md"), legacy);
+
+    loadAndDispose();
+
+    expect(readFileSync(agentsFile()).equals(fixture)).toBe(true);
+    expect(readFileSync(join(home, ".AGENTS.md")).equals(legacy)).toBe(true);
+  });
+
+  it.each([
+    "<!-- dsh-net-proxy:begin -->",
+    "<!-- dsh-codex-network-proxy:begin -->",
+  ])("keeps content carrying %s byte-for-byte", (marker) => {
+    const text = `# 全局工作偏好\n\n${marker}\n手工写的说明\n`;
+    writeFileSync(agentsFile(), text, "utf8");
+
+    loadAndDispose();
+
+    expect(readFileSync(agentsFile(), "utf8")).toBe(text);
+  });
+
+  it("ignores a legacy writeMemory config in config.json and in the plugin config", () => {
+    mkdirSync(join(home, ".dsh-net-proxy"), { recursive: true });
+    writeFileSync(
+      join(home, ".dsh-net-proxy", "config.json"),
+      JSON.stringify({ writeMemory: true }),
+      "utf8"
+    );
+
+    loadAndDispose({ writeMemory: true });
+
+    expect(() => readFileSync(agentsFile(), "utf8")).toThrow();
+  });
+});
+
+describe("AI tool surface", () => {
+  function markReady(names: string[] = ["node-a"]): void {
+    netProxy._state.config.enabled = true;
+    netProxy._state.config.mixedPort = 12_345;
+    netProxy._state.routing = {
+      installed: true,
+      via: "codex-transport",
+      error: undefined,
+    } as unknown as typeof netProxy._state.routing;
+    netProxy._state.kernel = {
+      status: "running",
+      pid: 9,
+    } as typeof netProxy._state.kernel;
+    netProxy._state.nodes = names.map((name) => ({
+      name,
+      type: "Trojan",
+      status: "ok",
+      delay: 40,
+      failCount: 0,
+      cooldownMs: 0,
+    }));
+    netProxy._state.current = names[0];
+  }
+
+  it("returns a privacy-trimmed status without subscription or log data", () => {
+    markReady(["node-a"]);
+    netProxy._state.config.subscriptionUrl = "https://secret-sub.example/list";
+    netProxy._state.nodes[0]!.error = "secret-node-error";
+    netProxy._state.lastError = "secret-last-error";
+    netProxy._state.kernel.error = "secret-kernel-error";
+    netProxy._state.kernel.log = "secret-kernel-log";
+
+    const status = netProxy.networkProxyToolStatus();
+    const text = JSON.stringify(status);
+    expect(text).not.toContain("secret");
     expect(text).not.toContain("subscriptionUrl");
-
-    // Second run: write-only-if-absent means no rewrite at all.
-    expect(netProxy._writeAgentMemory()).toEqual([]);
-    expect(readFileSync(file, "utf8")).toBe(text);
+    expect(status.ready).toBe(true);
+    expect(status.proxyUrl).toBe("http://127.0.0.1:12345");
+    expect(status.nodes).toEqual([{ name: "node-a", status: "ok", delay: 40 }]);
+    expect(status.fixedNode).toBe("auto");
+    expect(status.fixedNodeAvailable).toBe(true);
   });
 
-  it("treats the legacy standalone marker as already taught", () => {
-    const file = join(home, "AGENTS.md");
-    writeFileSync(file, "# 全局工作偏好\n\n<!-- dsh-net-proxy:begin -->\n旧版说明\n", "utf8");
-    netProxy._state.config.writeMemory = true;
+  it("enables on demand in codex scope and reports real readiness", async () => {
+    const previous = getGlobalDispatcher();
+    netProxy._state.config.mixedPort = 12_345;
+    netProxy._state.nodes = [
+      {
+        name: "node-a",
+        type: "Trojan",
+        status: "idle",
+        delay: undefined,
+        failCount: 0,
+        cooldownMs: 0,
+      },
+    ];
+    netProxy._runtime.api = vi.fn(async () => {
+      throw new Error("not serving");
+    });
+    netProxy._runtime.startKernel = vi.fn(async () => {
+      netProxy._state.kernel = {
+        status: "running",
+        pid: 5,
+      } as typeof netProxy._state.kernel;
+      return netProxy._state.kernel;
+    });
+    netProxy._runtime.testAllNodes = vi.fn(async () => ({ alive: 0, total: 1 }));
 
-    expect(netProxy._writeAgentMemory()).toEqual([]);
-    expect(readFileSync(file, "utf8")).toContain("<!-- dsh-net-proxy:begin -->");
-    expect(readFileSync(file, "utf8")).not.toContain("dsh-codex-network-proxy");
+    const result = await netProxy.enableNetworkProxyForTool();
+
+    expect(result.started).toBe(true);
+    expect(result.status.ready).toBe(true);
+    expect(result.status.proxyUrl).toBe("http://127.0.0.1:12345");
+    expect(netProxy._state.routing.via).toBe("codex-transport");
+    expect(getGlobalDispatcher()).toBe(previous);
+    expect(process.env.HTTP_PROXY).toBeUndefined();
   });
 
-  it("skips the write when memory was disabled", () => {
-    netProxy._state.config.writeMemory = false;
-    expect(netProxy._writeAgentMemory()).toEqual([]);
-    expect(() => readFileSync(join(home, "AGENTS.md"), "utf8")).toThrow();
+  it("refuses to enable a whole-DSH scope that is still off", async () => {
+    netProxy._state.config.scope = "global";
+    netProxy._state.config.mixedPort = 12_345;
+
+    await expect(netProxy.enableNetworkProxyForTool()).rejects.toThrow(
+      /不会擅自启用全局代理/u
+    );
+    expect(netProxy._state.config.enabled).toBe(false);
+    expect(netProxy._state.routing.installed).toBe(false);
+  });
+
+  it("reuses an already-running whole-DSH proxy without changing scope", async () => {
+    markReady(["node-a"]);
+    netProxy._state.config.scope = "global";
+    netProxy._state.routing = {
+      installed: true,
+      via: "global dispatcher + child env",
+      error: undefined,
+    } as unknown as typeof netProxy._state.routing;
+
+    const result = await netProxy.enableNetworkProxyForTool();
+
+    expect(result.started).toBe(false);
+    expect(result.status.scope).toBe("global");
+    expect(result.status.ready).toBe(true);
+  });
+
+  it("auto-enables from a closed state before its first measurement", async () => {
+    netProxy._state.config.mixedPort = 12_345;
+    netProxy._state.nodes = [
+      {
+        name: "node-a",
+        type: "Trojan",
+        status: "idle",
+        delay: undefined,
+        failCount: 0,
+        cooldownMs: 0,
+      },
+    ];
+    netProxy._runtime.api = vi.fn(async () => {
+      throw new Error("not serving");
+    });
+    netProxy._runtime.startKernel = vi.fn(async () => {
+      netProxy._state.kernel = {
+        status: "running",
+        pid: 5,
+      } as typeof netProxy._state.kernel;
+      return netProxy._state.kernel;
+    });
+    const testAllNodes = vi.fn(async () => ({ alive: 1, total: 1 }));
+    netProxy._runtime.testAllNodes = testAllNodes;
+
+    const result = await netProxy.testNetworkProxyForTool();
+
+    // One background sweep started by enable, plus the explicit tool sweep.
+    expect(testAllNodes).toHaveBeenCalledTimes(2);
+    expect(result.status.enabled).toBe(true);
+    expect(result.measured).toEqual({ alive: 1, total: 1, aborted: false });
+  });
+
+  it("clears the fixed node only when auto selection is explicit", async () => {
+    markReady(["node-a", "node-b"]);
+    netProxy._state.config.pinnedNode = "node-b";
+    netProxy._runtime.testAllNodes = vi.fn(async () => ({ alive: 2, total: 2 }));
+
+    const kept = await netProxy.testNetworkProxyForTool();
+    expect(kept.autoSelected).toBe(false);
+    expect(netProxy._state.config.pinnedNode).toBe("node-b");
+
+    const cleared = await netProxy.testNetworkProxyForTool({ autoSelect: true });
+    expect(cleared.autoSelected).toBe(true);
+    expect(netProxy._state.config.pinnedNode).toBe("auto");
+  });
+
+  it("fails with an explicit busy message instead of starting a second sweep", async () => {
+    markReady(["node-a"]);
+    const testAllNodes = vi.fn(async () => ({ alive: 1, total: 1 }));
+    netProxy._runtime.testAllNodes = testAllNodes;
+    netProxy._state.testing = true;
+
+    await expect(netProxy.testNetworkProxyForTool()).rejects.toThrow(
+      /已有测速在进行中/u
+    );
+    expect(testAllNodes).not.toHaveBeenCalled();
+  });
+
+  it("rejects a concurrent HTTP measurement immediately while the tool holds the queue", async () => {
+    const { ctx, routes, dispose } = fakeContext();
+    try {
+      netProxy.apply(ctx);
+      markReady(["node-a"]);
+      let release!: () => void;
+      const testAllNodes = vi.fn(
+        () =>
+          new Promise<{ alive: number; total: number }>((resolve) => {
+            release = () => resolve({ alive: 1, total: 1 });
+          })
+      );
+      netProxy._runtime.testAllNodes = testAllNodes as never;
+
+      const toolCall = netProxy.testNetworkProxyForTool();
+      await vi.waitFor(() => expect(testAllNodes).toHaveBeenCalledTimes(1));
+
+      const httpResult = await callRoute(
+        route(routes, "POST", `${BASE}/test`),
+        {}
+      );
+
+      expect(httpResult.status).toBe(500);
+      expect(String(httpResult.json.error)).toContain("已有测速");
+      expect(testAllNodes).toHaveBeenCalledTimes(1);
+
+      release();
+      await toolCall;
+      expect(testAllNodes).toHaveBeenCalledTimes(1);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("rejects a concurrent tool measurement immediately while HTTP holds the queue", async () => {
+    const { ctx, routes, dispose } = fakeContext();
+    try {
+      netProxy.apply(ctx);
+      markReady(["node-a"]);
+      let release!: () => void;
+      const testAllNodes = vi.fn(
+        () =>
+          new Promise<{ alive: number; total: number }>((resolve) => {
+            release = () => resolve({ alive: 1, total: 1 });
+          })
+      );
+      netProxy._runtime.testAllNodes = testAllNodes as never;
+
+      const httpCall = callRoute(route(routes, "POST", `${BASE}/test`), {});
+      await vi.waitFor(() => expect(testAllNodes).toHaveBeenCalledTimes(1));
+
+      await expect(netProxy.testNetworkProxyForTool()).rejects.toThrow(
+        /已有测速在进行中/u
+      );
+      expect(testAllNodes).toHaveBeenCalledTimes(1);
+
+      release();
+      expect((await httpCall).status).toBe(200);
+
+      // The gate is released again, so the next request can measure.
+      netProxy._runtime.testAllNodes = vi.fn(async () => ({
+        alive: 1,
+        total: 1,
+      }));
+      const after = await netProxy.testNetworkProxyForTool();
+      expect(after.measured.alive).toBe(1);
+    } finally {
+      dispose();
+    }
+  });
+
+  it("releases the measurement queue after a failed sweep", async () => {
+    markReady(["node-a"]);
+    netProxy._runtime.testAllNodes = vi.fn(async () => {
+      throw new Error("sweep exploded");
+    });
+
+    await expect(netProxy.testNetworkProxyForTool()).rejects.toThrow(
+      /测速失败/u
+    );
+
+    netProxy._runtime.testAllNodes = vi.fn(async () => ({
+      alive: 1,
+      total: 1,
+    }));
+    const after = await netProxy.testNetworkProxyForTool();
+    expect(after.measured).toEqual({ alive: 1, total: 1, aborted: false });
+  });
+
+  it("pins an existing node and rolls the pin back when the switch fails", async () => {
+    markReady(["node-a", "node-b"]);
+
+    netProxy._runtime.switchTo = vi.fn(async (name: string) => {
+      netProxy._state.current = name;
+      return name;
+    });
+    const pinned = await netProxy.selectNetworkProxyNodeForTool("node-b");
+    expect(pinned.fixedNode).toBe("node-b");
+    expect(pinned.selected).toBe("node-b");
+
+    netProxy._state.config.pinnedNode = "auto";
+    netProxy._runtime.switchTo = vi.fn(async () => {
+      throw new Error("core rejected the switch");
+    });
+    await expect(netProxy.selectNetworkProxyNodeForTool("node-b")).rejects.toThrow(
+      /已保留原固定节点设置/u
+    );
+    expect(netProxy._state.config.pinnedNode).toBe("auto");
+  });
+
+  it("rejects unknown nodes and never silently persists them", async () => {
+    markReady(["node-a"]);
+    netProxy._state.config.pinnedNode = "auto";
+    netProxy._runtime.switchTo = vi.fn(async () => "node-b");
+
+    await expect(netProxy.selectNetworkProxyNodeForTool("node-z")).rejects.toThrow(
+      /未知节点/u
+    );
+    expect(netProxy._state.config.pinnedNode).toBe("auto");
+    expect(netProxy._runtime.switchTo).not.toHaveBeenCalled();
+  });
+
+  it("returns to automatic selection with node=auto", async () => {
+    markReady(["node-a", "node-b"]);
+    netProxy._state.config.pinnedNode = "node-b";
+    const selectBest = vi.fn(async () => "node-a");
+    netProxy._runtime.selectBest = selectBest;
+
+    const result = await netProxy.selectNetworkProxyNodeForTool("auto");
+
+    expect(selectBest).toHaveBeenCalledTimes(1);
+    expect(result.fixedNode).toBe("auto");
+    expect(netProxy._state.config.pinnedNode).toBe("auto");
+  });
+
+  it("blocks a second HTTP measurement while the AI tool is already measuring", async () => {
+    const { ctx, routes, dispose } = fakeContext();
+    try {
+      netProxy.apply(ctx);
+      markReady(["node-a"]);
+      const testAllNodes = vi.fn(async () => ({ alive: 1, total: 1 }));
+      netProxy._runtime.testAllNodes = testAllNodes;
+      netProxy._state.testing = true;
+
+      const result = await callRoute(route(routes, "POST", `${BASE}/test`), {});
+
+      expect(result.status).toBe(500);
+      expect(String(result.json.error)).toContain("已有测速在进行中");
+      expect(testAllNodes).not.toHaveBeenCalled();
+    } finally {
+      dispose();
+    }
   });
 });
 

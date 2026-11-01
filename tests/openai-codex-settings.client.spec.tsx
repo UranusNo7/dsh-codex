@@ -51,13 +51,6 @@ describe("OpenAI Codex settings model catalog", () => {
     let fastModeDefault = false;
     let automaticModelFallback = false;
     let authStatus = "signed-out";
-    let proxy = { proxyMode: "off", proxyUrl: "" };
-    let nextProbe = async (): Promise<Record<string, unknown>> => ({
-      outcome: "ok",
-      status: 200,
-      elapsedMs: 12,
-      explicitProxy: true,
-    });
     const fetchMock = vi.fn(
       async (
         input: string | URL | Request,
@@ -110,16 +103,6 @@ describe("OpenAI Codex settings model catalog", () => {
               automaticModelFallback = patch.automaticModelFallback;
           }
           return json({ automaticModelFallback });
-        }
-        if (path.endsWith("/proxy")) {
-          if (init?.method === "POST") {
-            const patch = JSON.parse(String(init.body)) as Partial<typeof proxy>;
-            proxy = { ...proxy, ...patch };
-            if (patch.proxyUrl === undefined) return json(proxy);
-            const connectivity = await nextProbe();
-            return json({ ...proxy, connectivity });
-          }
-          return json(proxy);
         }
         if (path.endsWith("/context-window")) {
           if (init?.method === "POST") {
@@ -215,118 +198,17 @@ describe("OpenAI Codex settings model catalog", () => {
       imageGenerationModel: "gpt-image-2.5-sunburst",
     });
 
-    const scopedProxy = await screen.findByRole<HTMLButtonElement>("radio", {
-      name: en.proxyModeScoped,
-    });
-    expect(scopedProxy.getAttribute("aria-checked")).toBe("false");
-    fireEvent.click(scopedProxy);
-    await waitFor(() => {
-      expect(proxy.proxyMode).toBe("scoped");
-      expect(scopedProxy.getAttribute("aria-checked")).toBe("true");
-    });
-    const proxyUrl = screen.getByRole<HTMLInputElement>("textbox", {
-      name: en.proxyUrl,
-    });
-    fireEvent.change(proxyUrl, {
-      target: { value: "http://127.0.0.1:7890" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: en.proxySave }));
-    await waitFor(() => {
-      expect(proxy.proxyUrl).toBe("http://127.0.0.1:7890");
-    });
-    const proxyPosts = fetchMock.mock.calls.filter(
-      ([input, init]) =>
-        String(input).endsWith("/proxy") && init?.method === "POST"
-    );
-    expect(JSON.parse(String(proxyPosts[0]?.[1]?.body))).toEqual({
-      proxyMode: "scoped",
-    });
-    expect(JSON.parse(String(proxyPosts[1]?.[1]?.body))).toEqual({
-      proxyUrl: "http://127.0.0.1:7890",
-    });
-
-    const proxySaveButton = screen.getByRole<HTMLButtonElement>("button", {
-      name: en.proxySave,
-    });
-    let releaseProbe!: (value: Record<string, unknown>) => void;
-    nextProbe = () =>
-      new Promise((resolve) => {
-        releaseProbe = resolve;
-      });
-    fireEvent.change(proxyUrl, {
-      target: { value: "http://127.0.0.1:7891" },
-    });
-    fireEvent.click(proxySaveButton);
-    await waitFor(() => {
-      expect(proxySaveButton.textContent).toBe(en.proxyTesting);
-    });
-    expect(proxySaveButton.disabled).toBe(true);
-    expect(proxyUrl.disabled).toBe(true);
-    releaseProbe({ outcome: "ok", status: 200, elapsedMs: 9, explicitProxy: true });
-    await waitFor(() => {
-      expect(proxySaveButton.disabled).toBe(false);
-      expect(proxySaveButton.textContent).toBe(en.proxySave);
-    });
-    const successMessage = await screen.findByText(/\(HTTP 200, 9 ms\)/u);
-    expect(successMessage.getAttribute("role")).toBe("status");
-
-    fireEvent.change(proxyUrl, {
-      target: { value: "http://127.0.0.1:7892" },
-    });
-    expect(screen.queryByText(/\(HTTP 200, 9 ms\)/u)).toBeNull();
-
-    nextProbe = async () => ({
-      outcome: "http-error",
-      status: 403,
-      elapsedMs: 20,
-      explicitProxy: true,
-    });
-    fireEvent.click(proxySaveButton);
-    const httpAlert = await screen.findByRole("alert");
-    expect(httpAlert.textContent).toContain("HTTP 403");
-
-    nextProbe = async () => ({
-      outcome: "timeout",
-      elapsedMs: 10_000,
-      explicitProxy: true,
-    });
-    fireEvent.click(proxySaveButton);
-    await waitFor(() => {
-      expect(screen.getByRole("alert").textContent).toContain("timed out");
-    });
-
-    nextProbe = async () => ({
-      outcome: "network-error",
-      elapsedMs: 5,
-      explicitProxy: true,
-    });
-    fireEvent.click(proxySaveButton);
-    await waitFor(() => {
-      expect(screen.getByRole("alert").textContent).toContain(
-        "could not connect"
-      );
-    });
-
-    fireEvent.click(screen.getByRole("radio", { name: en.proxyModeOff }));
-    await waitFor(() => {
-      expect(proxy.proxyMode).toBe("off");
-    });
-    expect(await screen.findByText(en.proxySaved)).toBeDefined();
-
-    nextProbe = async () => ({
-      outcome: "ok",
-      status: 200,
-      elapsedMs: 5,
-      explicitProxy: false,
-    });
-    fireEvent.change(proxyUrl, { target: { value: "" } });
-    fireEvent.click(proxySaveButton);
-    const environmentMessage = await screen.findByText(
-      /environment proxy or a direct connection/u
-    );
-    expect(environmentMessage.getAttribute("role")).toBe("status");
-    expect(screen.getByText(en.proxyProbeEnvironment)).toBeDefined();
-    expect(screen.getByText(en.proxyProbeModeOff)).toBeDefined();
+    // The old manual proxy card was removed from this page: the dedicated
+    // Network proxy settings section owns that surface now, and rendering this
+    // page must not read or post the legacy /proxy endpoint.
+    expect(screen.queryByRole("radiogroup", { name: en.proxyMode })).toBeNull();
+    expect(screen.queryByText(en.proxyIntro)).toBeNull();
+    expect(screen.queryByRole("button", { name: en.proxySave })).toBeNull();
+    expect(
+      fetchMock.mock.calls.filter(([input]) =>
+        String(input).endsWith("/proxy")
+      )
+    ).toHaveLength(0);
 
     const fastModeToggle = await screen.findByRole<HTMLButtonElement>(
       "switch",
@@ -384,5 +266,242 @@ describe("OpenAI Codex settings model catalog", () => {
     expect(await screen.findByText("ABCD-EFGH")).toBeDefined();
     expect(screen.getByRole<HTMLAnchorElement>("link", { name: "https://auth.openai.com/codex/device" }).href)
       .toBe("https://auth.openai.com/codex/device");
+  });
+});
+
+interface CatalogPayload {
+  availableModels: Array<{ id: string; name: string; contextWindow: number }>;
+  models: string[];
+  discovery?: {
+    source: "official" | "cache" | "bundled" | "codex-cache";
+    updatedAt?: number;
+    error?: string;
+  };
+}
+
+/** Mock every settings endpoint; only the catalog and its refresh vary. */
+function stubSettingsFetch(
+  catalog: CatalogPayload,
+  refresh: () => Promise<Response> = async () => json(catalog)
+) {
+  const fetchMock = vi.fn(
+    async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ): Promise<Response> => {
+      const path = String(input);
+      if (path.endsWith("/models/refresh")) return refresh();
+      if (path.endsWith("/models")) return json(catalog);
+      if (path.endsWith("/auth/status")) return json({ status: "signed-out" });
+      if (path.endsWith("/image-tools"))
+        return json({
+          modifyReadImage: true,
+          shareImagegenWithOtherModels: true,
+          imageGenerationModel: "gpt-image-2",
+        });
+      if (path.endsWith("/response-api"))
+        return json({
+          useWebSocketContextReuse: false,
+          useNativeCompaction: false,
+        });
+      if (path.endsWith("/fast-mode-default"))
+        return json({ fastModeDefault: false });
+      if (path.endsWith("/model-fallback"))
+        return json({ automaticModelFallback: false });
+      if (path.endsWith("/context-window")) return json({ contextWindow: null });
+      throw new Error(`unexpected settings request: ${path}`);
+    }
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+const catalogModels = [
+  { id: "gpt-5.6-luna", name: "GPT-5.6 Luna", contextWindow: 272_000 },
+  { id: "gpt-5.6-sol", name: "GPT-5.6 Sol", contextWindow: 272_000 },
+];
+
+function catalogModelPosts(fetchMock: ReturnType<typeof vi.fn>) {
+  return fetchMock.mock.calls.filter(
+    ([input, init]) =>
+      String(input).endsWith("/models") && init?.method === "POST"
+  );
+}
+
+describe("OpenAI Codex settings dynamic catalog refresh", () => {
+  it("refreshes the catalog, shows new models, and keeps the saved selection", async () => {
+    const terra = {
+      id: "gpt-6-terra",
+      name: "GPT-6 Terra",
+      contextWindow: 500_000,
+    };
+    const refreshed: CatalogPayload = {
+      availableModels: [...catalogModels, terra],
+      models: ["gpt-5.6-luna"],
+      discovery: { source: "official", updatedAt: Date.UTC(2026, 0, 2, 3, 4) },
+    };
+    const fetchMock = stubSettingsFetch(
+      { availableModels: [...catalogModels], models: ["gpt-5.6-luna"] },
+      async () => json(refreshed)
+    );
+
+    render(<OpenAICodexSettings t={t} />);
+    const luna = await screen.findByRole<HTMLButtonElement>("switch", {
+      name: /GPT-5\.6 Luna/u,
+    });
+    const sol = screen.getByRole<HTMLButtonElement>("switch", {
+      name: /GPT-5\.6 Sol/u,
+    });
+    expect(luna.getAttribute("aria-checked")).toBe("true");
+    expect(sol.getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: en.modelCatalogRefresh })
+    );
+    const terraSwitch = await screen.findByRole<HTMLButtonElement>("switch", {
+      name: /GPT-6 Terra/u,
+    });
+    expect(terraSwitch.getAttribute("aria-checked")).toBe("false");
+    expect(
+      screen.getByRole("switch", { name: /GPT-5\.6 Luna/u })
+        .getAttribute("aria-checked")
+    ).toBe("true");
+    expect(
+      screen.getByRole("switch", { name: /GPT-5\.6 Sol/u })
+        .getAttribute("aria-checked")
+    ).toBe("false");
+    expect(catalogModelPosts(fetchMock)).toHaveLength(0);
+
+    expect(
+      await screen.findByText(
+        t("modelCatalogSource", { source: en.modelCatalogSourceOfficial })
+      )
+    ).toBeDefined();
+    expect(screen.getByText(/^Last updated: /u)).toBeDefined();
+
+    const refreshCall = fetchMock.mock.calls.find(([input]) =>
+      String(input).endsWith("/models/refresh")
+    );
+    expect(JSON.parse(String(refreshCall?.[1]?.body))).toEqual({});
+    expect(refreshCall?.[1]?.method).toBe("POST");
+  });
+
+  it("disables the refresh button and model toggles while refreshing", async () => {
+    let resolveRefresh: (response: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    stubSettingsFetch(
+      { availableModels: [...catalogModels], models: ["gpt-5.6-luna"] },
+      () => pending
+    );
+
+    render(<OpenAICodexSettings t={t} />);
+    const luna = await screen.findByRole<HTMLButtonElement>("switch", {
+      name: /GPT-5\.6 Luna/u,
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: en.modelCatalogRefresh })
+    );
+    const refreshing = await screen.findByRole<HTMLButtonElement>("button", {
+      name: en.modelCatalogRefreshing,
+    });
+    expect(refreshing.disabled).toBe(true);
+    expect(luna.disabled).toBe(true);
+
+    resolveRefresh(
+      json({
+        availableModels: [...catalogModels],
+        models: ["gpt-5.6-luna"],
+        discovery: { source: "official" },
+      })
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", {
+          name: en.modelCatalogRefresh,
+        }).disabled
+      ).toBe(false);
+    });
+    expect(
+      screen.getByRole<HTMLButtonElement>("switch", {
+        name: /GPT-5\.6 Luna/u,
+      }).disabled
+    ).toBe(false);
+  });
+
+  it("keeps the loaded models and localizes a network refresh failure", async () => {
+    stubSettingsFetch(
+      { availableModels: [...catalogModels], models: ["gpt-5.6-luna"] },
+      async () => {
+        throw new Error("network down");
+      }
+    );
+
+    render(<OpenAICodexSettings t={t} />);
+    await screen.findByRole("switch", { name: /GPT-5\.6 Luna/u });
+    fireEvent.click(
+      screen.getByRole("button", { name: en.modelCatalogRefresh })
+    );
+    expect(await screen.findByText(en.modelCatalogRefreshFailed)).toBeDefined();
+    expect(screen.queryByText(/network down/u)).toBeNull();
+    expect(
+      screen.getByRole("switch", { name: /GPT-5\.6 Luna/u })
+    ).toBeDefined();
+    expect(
+      screen.getByRole("switch", { name: /GPT-5\.6 Sol/u })
+    ).toBeDefined();
+  });
+
+  it("shows the source and a localized discovery error without raw details", async () => {
+    stubSettingsFetch({
+      availableModels: [...catalogModels],
+      models: ["gpt-5.6-luna"],
+      discovery: {
+        source: "cache",
+        updatedAt: Date.UTC(2026, 0, 2, 3, 4),
+        error: "upstream timeout",
+      },
+    });
+
+    render(<OpenAICodexSettings t={t} />);
+    expect(
+      await screen.findByText(
+        t("modelCatalogSource", { source: en.modelCatalogSourceCache })
+      )
+    ).toBeDefined();
+    expect(screen.getByText(/^Last updated: /u)).toBeDefined();
+    expect(await screen.findByText(en.modelCatalogDiscoveryError)).toBeDefined();
+    expect(screen.queryByText(/upstream timeout/u)).toBeNull();
+    expect(
+      screen.getByRole("switch", { name: /GPT-5\.6 Luna/u })
+    ).toBeDefined();
+  });
+
+  it("accepts catalog responses without discovery details", async () => {
+    stubSettingsFetch(
+      { availableModels: [...catalogModels], models: ["gpt-5.6-luna"] },
+      async () =>
+        json({
+          availableModels: [...catalogModels],
+          models: ["gpt-5.6-luna"],
+          discovery: { source: "official", updatedAt: Date.UTC(2026, 0, 2, 3, 4) },
+        })
+    );
+
+    render(<OpenAICodexSettings t={t} />);
+    await screen.findByRole("switch", { name: /GPT-5\.6 Luna/u });
+    expect(screen.queryByText(/^Catalog source: /u)).toBeNull();
+    expect(screen.queryByText(/^Last updated: /u)).toBeNull();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: en.modelCatalogRefresh })
+    );
+    expect(
+      await screen.findByText(
+        t("modelCatalogSource", { source: en.modelCatalogSourceOfficial })
+      )
+    ).toBeDefined();
+    expect(screen.getByText(/^Last updated: /u)).toBeDefined();
   });
 });
