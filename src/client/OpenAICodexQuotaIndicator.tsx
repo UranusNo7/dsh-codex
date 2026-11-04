@@ -1,11 +1,11 @@
 /** Compact weekly Codex quota indicator for the Composer tool row. */
 
-import { useEffect, useId, useSyncExternalStore, useState } from 'react'
+import { useEffect, useId, useRef, useSyncExternalStore, useState } from 'react'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { OpenAICodexUsage, OpenAICodexRateLimitWindow } from '../usage.ts'
 import { OPENAI_CODEX_AUTH_STATUS_PATH } from '../auth-paths.ts'
-import { formatOpenAICodexResetAt } from './OpenAICodexSettings.tsx'
+import { formatOpenAICodexResetAt, subscribeRelayChanges } from './OpenAICodexSettings.tsx'
 import type { OpenAICodexSettingsKey } from './locales.ts'
 
 const WEEK_SECONDS = 7 * 24 * 60 * 60
@@ -117,6 +117,7 @@ export function OpenAICodexQuotaIndicator({ directory, t }: OpenAICodexQuotaIndi
   const [request, setRequest] = useState<UsageRequestState>({ status: 'loading' })
   const [isHovered, setIsHovered] = useState(false)
   const [isFocused, setIsFocused] = useState(false)
+  const relayMode = useRef(false)
   const tooltipId = useId()
 
   useEffect(() => {
@@ -126,12 +127,13 @@ export function OpenAICodexQuotaIndicator({ directory, t }: OpenAICodexQuotaIndi
     }
 
     const controller = new AbortController()
-    let inFlight = false
     let disposed = false
+    let sequence = 0
+    relayMode.current = false
 
     const refresh = async (): Promise<void> => {
-      if (inFlight || disposed) return
-      inFlight = true
+      if (disposed || relayMode.current) return
+      const current = ++sequence
       try {
         const response = await fetch(OPENAI_CODEX_AUTH_STATUS_PATH, {
           method: 'GET',
@@ -140,23 +142,36 @@ export function OpenAICodexQuotaIndicator({ directory, t }: OpenAICodexQuotaIndi
           signal: controller.signal,
         })
         const value: unknown = await response.json().catch(() => undefined)
-        const usage = response.ok ? usageFromStatus(value) : undefined
-        if (!disposed && !controller.signal.aborted) {
-          setRequest(usage === undefined ? { status: 'hidden' } : { status: 'ready', usage })
+        if (disposed || controller.signal.aborted || current !== sequence) return
+        if (isRecord(value) && value['status'] === 'relay') {
+          relayMode.current = true
+          setRequest({ status: 'hidden' })
+          return
         }
+        const usage = response.ok ? usageFromStatus(value) : undefined
+        setRequest(usage === undefined ? { status: 'hidden' } : { status: 'ready', usage })
       } catch {
-        if (!disposed && !controller.signal.aborted) setRequest({ status: 'hidden' })
-      } finally {
-        inFlight = false
+        if (!disposed && !controller.signal.aborted && current === sequence) {
+          setRequest({ status: 'hidden' })
+        }
       }
     }
 
     setRequest({ status: 'loading' })
     void refresh()
-    const timer = window.setInterval(() => { void refresh() }, USAGE_POLL_INTERVAL_MS)
+    const timer = window.setInterval(() => {
+      if (!relayMode.current) void refresh()
+    }, USAGE_POLL_INTERVAL_MS)
+    const unsubscribeRelay = subscribeRelayChanges(() => {
+      relayMode.current = false
+      sequence++
+      setRequest({ status: 'loading' })
+      void refresh()
+    })
     return () => {
       disposed = true
       window.clearInterval(timer)
+      unsubscribeRelay()
       controller.abort()
     }
   }, [eligible])

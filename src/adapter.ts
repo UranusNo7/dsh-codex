@@ -30,6 +30,15 @@ import type { OpenAICodexCredentialStore } from "./store.ts";
 import { OPENAI_CODEX_PROVIDER } from "./store.ts";
 import { OpenAICodexResponseRuntime } from "./responses.ts";
 import type { TokenEstimator } from "./responses.ts"
+import type { RelayResolver } from "./relay.ts";
+import {
+  RELAY_API_KEY_SENTINEL,
+  currentRelayDecision,
+  recordRelayMode,
+  runRelayDecision,
+  withRelayTransport,
+} from "./relay-provider.ts";
+import type { RelayDecision, RelayTransportDeps } from "./relay-provider.ts";
 import type { CompactionDecision } from "./compaction-types.ts";
 import type {
   ModelCatalogEntry,
@@ -619,9 +628,49 @@ class OpenAICodexAdapter extends PiAiAdapter {
   constructor(
     options: ConstructorParameters<typeof PiAiAdapter>[0],
     private readonly responses: OpenAICodexResponseRuntime,
-    private readonly visibleModelIds?: () => readonly string[]
+    private readonly visibleModelIds?: () => readonly string[],
+    private readonly relay?: RelayResolver
   ) {
     super(options);
+  }
+
+  /** Freeze one step's relay decision exactly once, before any auth lookup. */
+  private resolveRelayDecision(): RelayDecision {
+    if (this.relay === undefined) return {};
+    try {
+      const relay = this.relay();
+      return relay === undefined ? {} : { relay };
+    } catch (error) {
+      return {
+        error:
+          error instanceof Error
+            ? error
+            : new Error("relay configuration is invalid"),
+      };
+    }
+  }
+
+  /**
+   * Pump one prepared stream with the frozen decision active for every
+   * `next`/`return`, so the auth lookup, the model snapshot, the transport
+   * selection, and the native compaction request all observe the same mode.
+   */
+  private async *runStep(
+    decision: RelayDecision,
+    iterate: () => AsyncIterable<StreamChunk>
+  ): AsyncIterable<StreamChunk> {
+    const iterator = runRelayDecision(decision, () =>
+      iterate()[Symbol.asyncIterator]()
+    );
+    try {
+      while (true) {
+        const result = await runRelayDecision(decision, () => iterator.next());
+        if (result.done === true) return;
+        yield result.value;
+      }
+    } finally {
+      await runRelayDecision(decision, () => iterator.return?.(undefined));
+    }
   }
 
   override async listModels(provider: string) {
@@ -660,15 +709,24 @@ class OpenAICodexAdapter extends PiAiAdapter {
     model: string,
     signal?: AbortSignal
   ): Promise<PreparedAdapterCall> {
+    const decision = this.resolveRelayDecision();
+    recordRelayMode(decision.relay);
     const prepared = await super.prepareCall(provider, model, signal);
     return {
       model: prepared.model,
-      stream: (options) => this.streamPrepared(prepared.stream, options),
+      stream: (options) =>
+        this.runStep(decision, () =>
+          this.streamPrepared(prepared.stream, options)
+        ),
     };
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    yield* this.streamPrepared((next) => super.stream(next), options);
+    const decision = this.resolveRelayDecision();
+    recordRelayMode(decision.relay);
+    yield* this.runStep(decision, () =>
+      this.streamPrepared((next) => super.stream(next), options)
+    );
   }
 }
 
@@ -689,10 +747,17 @@ export function createOpenAICodexAdapter(
   fastModeDefault?: () => boolean,
   modelProvider: Provider = createOpenAICodexModelProvider(),
   estimateText?: TokenEstimator,
-  onCompactionDecision?: (decision: CompactionDecision) => void
+  onCompactionDecision?: (decision: CompactionDecision) => void,
+  relay?: RelayResolver,
+  relayFetch?: FetchFunction
 ): PiAiAdapter {
+  const relayDeps: RelayTransportDeps | undefined =
+    relayFetch === undefined ? undefined : { fetch: relayFetch };
+  // The relay transport wrapper sits under Fast Mode so service_tier and the
+  // compaction marker still flow through the same payload hooks.
+  const transportProvider = withRelayTransport(modelProvider, relayDeps);
   const provider = requestProvider(
-    modelProvider,
+    transportProvider,
     fastMode,
     fastModeDefault,
     requestFetch
@@ -701,7 +766,12 @@ export function createOpenAICodexAdapter(
     responsePreferences,
     requestFetch,
     estimateText,
-    onCompactionDecision
+    onCompactionDecision,
+    relay,
+    relayDeps,
+    (model, sessionId) =>
+      model.id !== OPENAI_CODEX_LUNA_RESERVE_MODEL &&
+      (fastModeDefault?.() === true || fastMode?.isEnabled(sessionId) === true)
   );
   const unset = Symbol("unset context window");
   let resolvedContextWindow: number | null | undefined | typeof unset = unset;
@@ -751,8 +821,14 @@ export function createOpenAICodexAdapter(
   return new OpenAICodexAdapter(
     {
       profiles,
-      resolveApiKey: async () =>
-        (await models.getAuth(OPENAI_CODEX_PROVIDER))?.auth.apiKey,
+      resolveApiKey: async () => {
+        // One frozen decision per step: relay steps never read the OAuth
+        // credential store, and an explicit refusal never degrades to direct.
+        const decision = currentRelayDecision();
+        if (decision?.error !== undefined) throw decision.error;
+        if (decision?.relay !== undefined) return RELAY_API_KEY_SENTINEL;
+        return (await models.getAuth(OPENAI_CODEX_PROVIDER))?.auth.apiKey;
+      },
       auth,
       resolveAttachments: () => {
         const resolved = resolveAttachments();
@@ -765,6 +841,7 @@ export function createOpenAICodexAdapter(
       },
     },
     responses,
-    visibleModelIds
+    visibleModelIds,
+    relay
   );
 }

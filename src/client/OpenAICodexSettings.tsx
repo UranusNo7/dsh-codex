@@ -16,6 +16,7 @@ import type {
 import type { OpenAICodexSettingsKey } from "./locales.ts";
 import { OPENAI_CODEX_IMAGE_MODELS } from "../image-model.ts";
 import type { OpenAICodexImageModel } from "../image-model.ts";
+import type { RelayPreferences, RelaySnapshot } from "../relay.ts";
 
 const STATUS_PATH = "/plugins/dsh-openai-codex/auth/status";
 const LOGIN_PATH = "/plugins/dsh-openai-codex/auth/login";
@@ -29,8 +30,24 @@ const CONTEXT_WINDOW_PATH = "/plugins/dsh-openai-codex/context-window";
 const FAST_MODE_SETTINGS_PATH = "/plugins/dsh-openai-codex/fast-mode-default";
 const MODEL_FALLBACK_SETTINGS_PATH =
   "/plugins/dsh-openai-codex/model-fallback";
+const RELAY_SETTINGS_PATH = "/plugins/dsh-openai-codex/relay";
 const POLL_INTERVAL_MS = 1_000;
 const USAGE_POLL_INTERVAL_MS = 60_000;
+
+type RelayChangeListener = () => void;
+const relayChangeListeners = new Set<RelayChangeListener>();
+
+/** Notify same-page surfaces that relay preferences changed without polling. */
+export function subscribeRelayChanges(listener: RelayChangeListener): () => void {
+  relayChangeListeners.add(listener);
+  return () => {
+    relayChangeListeners.delete(listener);
+  };
+}
+
+export function notifyRelayPreferencesChanged(): void {
+  for (const listener of relayChangeListeners) listener();
+}
 
 type AccountStatus =
   | { status: "loading" }
@@ -38,6 +55,7 @@ type AccountStatus =
   | { status: "signing-in" }
   | { status: "reauth-required"; message: string }
   | { status: "signed-in"; usage: OpenAICodexUsage; quotaError?: string }
+  | { status: "relay"; relay: RelaySnapshot }
   | { status: "remote-web-origin-not-trusted" }
   | { status: "error"; message: string };
 
@@ -555,7 +573,7 @@ function UsageLimits({
 
 function dotStyle(status: AccountStatus["status"]): CSSProperties {
   const color =
-    status === "signed-in"
+    status === "signed-in" || status === "relay"
       ? "var(--dsw-alias-state-success-primary, #22a06b)"
       : status === "error" ||
           status === "reauth-required" ||
@@ -656,6 +674,11 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
   const [modelFallbackError, setModelFallbackError] = useState<
     string | undefined
   >();
+  const [relay, setRelay] = useState<RelaySnapshot | undefined>();
+  const [relayBaseUrlDraft, setRelayBaseUrlDraft] = useState("");
+  const [relayApiKeyDraft, setRelayApiKeyDraft] = useState("");
+  const [relayBusy, setRelayBusy] = useState(false);
+  const [relayError, setRelayError] = useState<string | undefined>();
   const trustedOriginCommand = `dsh plugin --profile web exec dsh-codex trust-origin ${window.location.origin}`;
 
   const refresh = useCallback(async () => {
@@ -746,6 +769,18 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
       },
       () => {
         setModelFallbackError(t("modelFallbackSettingsFailed"));
+      }
+    );
+  }, [t]);
+  useEffect(() => {
+    void jsonRequest<RelaySnapshot>(RELAY_SETTINGS_PATH).then(
+      (value) => {
+        setRelay(value);
+        setRelayBaseUrlDraft(value.relayBaseUrl);
+        setRelayError(undefined);
+      },
+      () => {
+        setRelayError(t("relayLoadFailed"));
       }
     );
   }, [t]);
@@ -960,6 +995,60 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
     }
   };
 
+  const relayErrorMessage = (error: unknown): string =>
+    error instanceof AccountRequestError && error.code === "invalid-base-url"
+      ? t("relayInvalidBaseUrl")
+      : error instanceof AccountRequestError && error.code === "invalid-api-key"
+        ? t("relayInvalidApiKey")
+        : error instanceof AccountRequestError && error.code === "missing-api-key"
+          ? t("relayMissingApiKey")
+          : t("relaySettingsFailed");
+
+  const reloadCatalogAfterRelayChange = (): void => {
+    setModelCatalog(undefined);
+    void jsonRequest<ModelCatalogSettings>(MODEL_CATALOG_PATH).then(
+      (value) => {
+        setModelCatalog(value);
+        setModelCatalogError(undefined);
+      },
+      () => {
+        setModelCatalogError(t("modelCatalogSettingsFailed"));
+      }
+    );
+  };
+
+  const updateRelay = async (
+    patch: Partial<RelayPreferences>
+  ): Promise<void> => {
+    setRelayBusy(true);
+    setRelayError(undefined);
+    try {
+      const saved = await jsonRequest<RelaySnapshot>(
+        RELAY_SETTINGS_PATH,
+        "POST",
+        patch
+      );
+      setRelay(saved);
+      setRelayBaseUrlDraft(saved.relayBaseUrl);
+      setRelayApiKeyDraft("");
+      notifyRelayPreferencesChanged();
+      await refresh();
+      reloadCatalogAfterRelayChange();
+    } catch (error: unknown) {
+      setRelayError(relayErrorMessage(error));
+    } finally {
+      setRelayBusy(false);
+    }
+  };
+
+  const saveRelay = (): Promise<void> => {
+    const patch: Partial<RelayPreferences> = {
+      relayBaseUrl: relayBaseUrlDraft,
+    };
+    if (relayApiKeyDraft.length > 0) patch.relayApiKey = relayApiKeyDraft;
+    return updateRelay(patch);
+  };
+
   const copyTrustedOriginCommand = async (): Promise<void> => {
     setCopyFailed(false);
     try {
@@ -983,9 +1072,11 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
             ? t("reauthRequired")
             : status.status === "remote-web-origin-not-trusted"
               ? t("remoteOriginTitle")
-              : status.status === "error"
-                ? t("requestFailed")
-                : t("signedOut");
+              : status.status === "relay"
+                ? t("relayModeRelay")
+                : status.status === "error"
+                  ? t("requestFailed")
+                  : t("signedOut");
 
   const modelCatalogSource =
     modelCatalog?.discovery === undefined
@@ -1010,6 +1101,7 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
             <span>{label}</span>
           </div>
           {status.status === "loading" ||
+          status.status === "relay" ||
           status.status ===
             "remote-web-origin-not-trusted" ? null : status.status ===
             "signed-in" ? (
@@ -1095,6 +1187,95 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
             t={t}
           />
         ) : null}
+        {status.status === "relay" ? (
+          <p style={bodyStyle}>{t("relayModeActiveHint")}</p>
+        ) : null}
+      </div>
+      <div style={cardStyle}>
+        <div>
+          <h3 style={quotaTitleStyle}>{t("relayTitle")}</h3>
+          <p style={{ ...bodyStyle, marginTop: 5 }}>{t("relayIntro")}</p>
+        </div>
+        <p style={bodyStyle}>
+          {relay?.enabled === true ? t("relayModeRelay") : t("relayModeDirect")}
+          {" · "}
+          {relay?.relayApiKeySet === true
+            ? t("relayKeyConfigured")
+            : t("relayKeyNotConfigured")}
+        </p>
+        <div style={{ ...rowStyle, justifyContent: "flex-start" }}>
+          <label htmlFor="openai-codex-relay-url" style={statusStyle}>
+            {t("relayBaseUrl")}
+          </label>
+          <input
+            id="openai-codex-relay-url"
+            type="url"
+            inputMode="url"
+            autoComplete="off"
+            placeholder={t("relayBaseUrlPlaceholder")}
+            value={relayBaseUrlDraft}
+            disabled={relay === undefined || relayBusy}
+            style={{ ...numberInputStyle, flex: "1 1 320px", width: "auto" }}
+            onChange={(event) => {
+              setRelayBaseUrlDraft(event.currentTarget.value);
+            }}
+          />
+        </div>
+        <div style={{ ...rowStyle, justifyContent: "flex-start" }}>
+          <label htmlFor="openai-codex-relay-key" style={statusStyle}>
+            {t("relayApiKey")}
+          </label>
+          <input
+            id="openai-codex-relay-key"
+            type="password"
+            autoComplete="new-password"
+            placeholder={t("relayApiKeyPlaceholder")}
+            value={relayApiKeyDraft}
+            disabled={relay === undefined || relayBusy}
+            style={{ ...numberInputStyle, flex: "1 1 320px", width: "auto" }}
+            onChange={(event) => {
+              setRelayApiKeyDraft(event.currentTarget.value);
+            }}
+          />
+        </div>
+        <p style={bodyStyle}>{t("relayApiKeyKeepHint")}</p>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <button
+            type="button"
+            style={primaryButtonStyle}
+            disabled={relay === undefined || relayBusy}
+            onClick={() => {
+              void saveRelay();
+            }}>
+            {relayBusy ? t("relaySaving") : t("relaySave")}
+          </button>
+          <button
+            type="button"
+            style={buttonStyle}
+            disabled={relay === undefined || relayBusy || relay.enabled !== true}
+            onClick={() => {
+              void updateRelay({ relayBaseUrl: "" });
+            }}>
+            {t("relayClearUrl")}
+          </button>
+          <button
+            type="button"
+            style={buttonStyle}
+            disabled={
+              relay === undefined ||
+              relayBusy ||
+              relay.relayApiKeySet !== true
+            }
+            onClick={() => {
+              void updateRelay({ relayApiKey: "" });
+            }}>
+            {t("relayClearKey")}
+          </button>
+        </div>
+        <p style={bodyStyle}>{t("relayHint")}</p>
+        {relayError === undefined ? null : (
+          <p role="alert" style={errorStyle}>{relayError}</p>
+        )}
       </div>
       <div style={cardStyle}>
         <div>

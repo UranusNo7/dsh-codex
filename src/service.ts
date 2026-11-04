@@ -1,6 +1,7 @@
 /** Shared host service consumed by optional OpenAI Codex front-door adapters. */
 
 import { createModels } from "@earendil-works/pi-ai";
+import { Agent, fetch as undiciFetch } from "undici";
 import type { AuthInteraction, Credential } from "@earendil-works/pi-ai";
 import type { Context } from "@deepseek-ai/cordis";
 import {
@@ -33,6 +34,12 @@ import type {
   ModelFallbackPreferences,
   ResponseApiPreferences,
 } from "./tool-policy.ts";
+import { RelayUsageUnsupportedError, relayConfigOf } from "./relay.ts";
+import type {
+  RelayConfig,
+  RelayPreferences,
+  RelaySnapshot,
+} from "./relay.ts";
 import { readOpenAICodexRateLimits } from "./usage.ts";
 import type { OpenAICodexUsage } from "./usage.ts";
 
@@ -56,6 +63,10 @@ export interface OpenAICodexServiceOptions
   settingsNamespace?: string;
   models?: string[];
   modelCatalog: readonly ModelCatalogEntry[] | (() => readonly ModelCatalogEntry[]);
+  /** Third-party relay base URL; omitted or empty keeps direct traffic. */
+  relayBaseUrl?: string;
+  /** Static relay key; omitted or empty leaves the relay mode key unset. */
+  relayApiKey?: string;
   /** Non-official metadata source reported when no official catalog is usable. */
   modelCatalogSource?: () => "codex-cache" | "bundled";
   /** Injected official catalog reader; omitted to build the plugin's own. */
@@ -73,6 +84,25 @@ export class OpenAICodexService {
   readonly credentials: OpenAICodexCredentialStore;
   readonly policy: ImageToolPolicy;
   readonly proxy: OpenAICodexProxyTransport;
+  /**
+   * Dedicated direct dispatcher for relay traffic. An explicit undici Agent
+   * does not inherit the process-wide dispatcher, so a user-enabled global
+   * mihomo scope cannot route relay requests through its managed proxy.
+   */
+  private readonly relayDispatcher = new Agent();
+  /** Per-request transport: relay uses the dedicated agent, direct keeps proxy.fetch. */
+  readonly requestFetch: typeof globalThis.fetch = async (input, init) => {
+    if (this.relayConfig() === undefined) {
+      return await this.proxy.fetch(input, init);
+    }
+    return (await undiciFetch(
+      input as Parameters<typeof undiciFetch>[0],
+      {
+        ...(init as Record<string, unknown> | undefined),
+        dispatcher: this.relayDispatcher,
+      } as Parameters<typeof undiciFetch>[1]
+    )) as unknown as Response;
+  };
   private readonly catalog: OpenAICodexOfficialCatalog;
   private readonly catalogFallbackSource: () => "codex-cache" | "bundled";
   private readonly stopProxyWatch: () => void;
@@ -129,7 +159,8 @@ export class OpenAICodexService {
     // snapshot is adopted first, then the TTL decides whether to hit the wire.
     // Embedders that construct the service directly opt in explicitly so tests
     // can never reach a real account or endpoint.
-    if (warmModelCatalog === true) {
+    // Relay mode must not warm an official catalog for the previous account.
+    if (warmModelCatalog === true && !this.policy.relaySnapshot().enabled) {
       void this.loadModelCatalog().catch(() => undefined);
     }
   }
@@ -141,7 +172,16 @@ export class OpenAICodexService {
 
   /** Accept values committed in place by Harness's volatile configuration path. */
   refreshSettings(options: Partial<OpenAICodexServiceOptions>): void {
+    const relayBefore = this.policy.relaySnapshot().enabled;
     this.policy.refresh(options);
+    // Entering relay mode drops every account-only cache; a catalog refresh
+    // that was already in flight can no longer be adopted because all catalog
+    // reads are gated by the current relay snapshot.
+    if (!relayBefore && this.policy.relaySnapshot().enabled) {
+      this.catalog.invalidate();
+      this.usageCache = undefined;
+      this.lastUsage = undefined;
+    }
   }
 
   /** Start the provider-native OAuth lifecycle. */
@@ -168,6 +208,8 @@ export class OpenAICodexService {
 
   /** Read current subscription limits without issuing a model request. */
   async usage(forceRefresh = false): Promise<OpenAICodexUsage> {
+    // Relay mode has no account quota to read; refuse before any network call.
+    if (this.policy.relaySnapshot().enabled) throw new RelayUsageUnsupportedError();
     const now = Date.now();
     if (
       !forceRefresh &&
@@ -194,7 +236,32 @@ export class OpenAICodexService {
 
   /** Last successful account snapshot, used without delaying a healthy model request. */
   usageSnapshot(): OpenAICodexUsage | undefined {
+    // Relay accounts are not the OAuth account: never feed stale quota to fallback.
+    if (this.policy.relaySnapshot().enabled) return undefined;
     return this.lastUsage;
+  }
+
+  /** Browser-safe relay projection: URL and whether a key is configured. */
+  relaySnapshot(): RelaySnapshot {
+    return this.policy.relaySnapshot();
+  }
+
+  /** Resolve the active relay for host transports; direct traffic returns undefined. */
+  relayConfig(): RelayConfig | undefined {
+    return relayConfigOf(this.policy.relayPreferences());
+  }
+
+  /** Persist relay preferences and drop account-only caches while relay is active. */
+  async updateRelayPreferences(
+    patch: Partial<RelayPreferences>
+  ): Promise<RelaySnapshot> {
+    const snapshot = await this.policy.updateRelayPreferences(patch);
+    if (snapshot.enabled) {
+      this.catalog.invalidate();
+      this.usageCache = undefined;
+      this.lastUsage = undefined;
+    }
+    return snapshot;
   }
 
   imagePreferences(): ImageToolPreferences {
@@ -248,8 +315,11 @@ export class OpenAICodexService {
   }
 
   modelCatalogSettings(): ModelCatalogSettings {
-    const provenance = this.catalog.provenance();
-    const error = this.catalog.error();
+    // Relay mode never reports a previous direct account's official provenance;
+    // local bundled/codex-cache metadata stays available as the fallback source.
+    const relay = this.policy.relaySnapshot().enabled;
+    const provenance = relay ? undefined : this.catalog.provenance();
+    const error = relay ? undefined : this.catalog.error();
     const discovery: ModelCatalogDiscovery = {
       source: provenance?.source ?? this.catalogFallbackSource(),
       ...(provenance === undefined ? {} : { updatedAt: provenance.updatedAt }),
@@ -260,6 +330,9 @@ export class OpenAICodexService {
 
   /** Official catalog snapshot that constrains the advertised candidates. */
   modelCatalogOfficial(): OpenAICodexOfficialSnapshot | undefined {
+    // Relay traffic keeps only the bundled catalog: never advertise or cache
+    // candidates discovered for a previous OAuth account.
+    if (this.policy.relaySnapshot().enabled) return undefined;
     return this.catalog.snapshot();
   }
 
@@ -270,6 +343,10 @@ export class OpenAICodexService {
    * timeout and never touches chat traffic. A forced call skips the TTL.
    */
   async refreshModelCatalog(force = false): Promise<ModelCatalogSettings> {
+    if (this.policy.relaySnapshot().enabled) {
+      this.catalog.invalidate();
+      return this.modelCatalogSettings();
+    }
     await this.catalog.restore();
     await this.catalog.refresh(force);
     return this.modelCatalogSettings();
@@ -277,6 +354,10 @@ export class OpenAICodexService {
 
   /** Adopt a newly authenticated account without advertising the previous one. */
   adoptModelCatalogAccount(): void {
+    if (this.policy.relaySnapshot().enabled) {
+      this.catalog.invalidate();
+      return;
+    }
     this.catalog.invalidate();
     this.catalog.backgroundRefresh();
   }
@@ -302,6 +383,7 @@ export class OpenAICodexService {
     this.stopProxyWatch();
     this.catalog.dispose();
     await this.proxy.dispose();
+    await this.relayDispatcher.destroy().catch(() => undefined);
   }
 
   /** Adopt the persisted snapshot, then apply the TTL to the network refresh. */

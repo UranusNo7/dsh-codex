@@ -25,6 +25,17 @@ import type {
   CompactionProviderUsage,
   CompactionReason,
 } from './compaction-types.ts'
+import type { RelayConfig, RelayResolver } from './relay.ts'
+import {
+  RelayTransportError,
+  bindRelaySnapshot,
+  currentRelayDecision,
+  relayDirectFetch,
+  relayRequestHeaders,
+  relayResponsesUrl,
+  runRelayDecision,
+} from './relay-provider.ts'
+import type { RelayTransportDeps } from './relay-provider.ts'
 
 /** Responses endpoint used by the official Codex client, including V2 compaction. */
 export const OPENAI_CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
@@ -390,8 +401,70 @@ export class OpenAICodexResponseRuntime {
     private readonly preferences: () => ResponseApiPreferences,
     private readonly requestFetch: FetchFunction = globalThis.fetch,
     private readonly estimateText?: TokenEstimator,
-    private readonly onDecision?: (decision: CompactionDecision) => void
+    private readonly onDecision?: (decision: CompactionDecision) => void,
+    private readonly relay?: RelayResolver,
+    private readonly relayDeps?: RelayTransportDeps,
+    private readonly fastModeEnabled?: (model: Model<Api>, sessionId: string | undefined) => boolean
   ) {}
+
+  /** One request's provider service tier: Fast Mode must survive every path. */
+  private serviceTierOf(model: Model<Api>, sessionId: string | undefined): 'priority' | undefined {
+    if (this.fastModeEnabled === undefined) return undefined
+    try {
+      return this.fastModeEnabled(model, sessionId) ? 'priority' : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Freeze this step's relay decision exactly once: the prepared-step decision
+   * wins, otherwise the runtime resolves the resolver once for this call.
+   * A configuration change after this point cannot move the credential.
+   */
+  private relayDecision(): { readonly relay?: RelayConfig; readonly error?: unknown } {
+    const frozen = currentRelayDecision()
+    if (frozen !== undefined) {
+      return { ...(frozen.relay === undefined ? {} : { relay: frozen.relay }), ...(frozen.error === undefined ? {} : { error: frozen.error }) }
+    }
+    if (this.relay === undefined) return {}
+    try {
+      const relay = this.relay()
+      return relay === undefined ? {} : { relay }
+    } catch (error) {
+      return { error }
+    }
+  }
+
+  /** Fixed, credential-free failure stream for a refused relay configuration. */
+  private relayFailureStream(
+    model: Model<Api>,
+    options: SimpleStreamOptions | undefined,
+    error: unknown
+  ): AssistantMessageEventStream {
+    const stream = createAssistantMessageEventStream()
+    const output = {
+      role: 'assistant' as const,
+      content: [],
+      api: 'openai-codex-responses' as const,
+      provider: model.provider,
+      model: model.id,
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: 'error' as const,
+      timestamp: Date.now(),
+      errorMessage: error instanceof Error ? error.message : 'relay configuration is invalid',
+    }
+    stream.push({ type: 'error', reason: 'error', error: output })
+    stream.end()
+    return stream
+  }
 
   /**
    * Bind one Harness compaction stream to the source text it will replace.
@@ -489,24 +562,27 @@ export class OpenAICodexResponseRuntime {
     context: PiContext,
     options?: SimpleStreamOptions,
   ): AssistantMessageEventStream {
+    const decision = this.relayDecision()
+    if (decision.error !== undefined) return this.relayFailureStream(model, options, decision.error)
+    const relay = decision.relay
     const key = sessionKey(options?.sessionId)
     const compaction = this.compactionCalls.get(key)?.at(-1)
     const preferences = this.preferences()
     if (compaction === undefined) {
-      return this.standardStream(provider, model, context, options, preferences.useWebSocketContextReuse)
+      return this.standardStream(provider, model, context, options, preferences.useWebSocketContextReuse, relay)
     }
     if (!preferences.useNativeCompaction) {
       this.decide(options?.sessionId, 'native-disabled')
-      return this.standardStream(provider, model, context, options, false)
+      return this.standardStream(provider, model, context, options, false, relay)
     }
     if (compaction.sourceEstimate === undefined || compaction.sourceEstimate.tokens <= 0) {
       this.decide(
         options?.sessionId,
         this.estimateText === undefined ? 'no-estimator' : 'no-source-budget'
       )
-      return this.standardStream(provider, model, context, options, false)
+      return this.standardStream(provider, model, context, options, false, relay)
     }
-    return this.nativeCompactionStream(provider, model, context, options, compaction)
+    return this.nativeCompactionStream(provider, model, context, options, compaction, relay)
   }
 
   private standardStream(
@@ -515,19 +591,29 @@ export class OpenAICodexResponseRuntime {
     context: PiContext,
     options: SimpleStreamOptions | undefined,
     reuseWebSocketContext: boolean,
+    relay: RelayConfig | undefined,
   ): AssistantMessageEventStream {
-    return provider.streamSimple(model, context, {
+    const serviceTier = this.serviceTierOf(model, options?.sessionId)
+    const nextOptions = bindRelaySnapshot({
       ...options,
+      ...(serviceTier === undefined ? {} : { serviceTier }),
       transport: reuseWebSocketContext ? 'websocket-cached' : 'sse',
       onPayload: async (payload, payloadModel) => {
         if (!isRecord(payload)) throw new Error('OpenAI Codex generated a non-object Responses payload')
         const input = Array.isArray(payload['input']) ? expandNativeCompactionMarkers(payload['input']) : payload['input']
         const transformed = { ...payload, input }
-        return options?.onPayload === undefined
-          ? transformed
-          : await options.onPayload(transformed, payloadModel)
+        // An observing caller hook (returns undefined) must not drop the
+        // expanded checkpoint: the transformed body stays authoritative.
+        const override = await options?.onPayload?.(transformed, payloadModel)
+        return override ?? transformed
       },
-    })
+    } as SimpleStreamOptions, relay)
+    // Re-enter the frozen decision around the real provider call: wrappers that
+    // rebuild the options object (Fast Mode) must not lose the mode binding.
+    return runRelayDecision(
+      relay === undefined ? {} : { relay },
+      () => provider.streamSimple(model, context, nextOptions)
+    )
   }
 
   private nativeCompactionStream(
@@ -536,13 +622,14 @@ export class OpenAICodexResponseRuntime {
     context: PiContext,
     options: SimpleStreamOptions | undefined,
     compaction: CompactionCall,
+    relay: RelayConfig | undefined,
   ): AssistantMessageEventStream {
     const target = createAssistantMessageEventStream()
     // One async owner: the source is chosen exactly once, and any selection or
     // iteration failure becomes one explicit terminal event.
     void (async () => {
       try {
-        const source = await this.chooseCompactionStream(provider, model, context, options, compaction)
+        const source = await this.chooseCompactionStream(provider, model, context, options, compaction, relay)
         for await (const event of source) target.push(event)
       } catch (error) {
         target.push({
@@ -580,6 +667,7 @@ export class OpenAICodexResponseRuntime {
     context: PiContext,
     options: SimpleStreamOptions | undefined,
     compaction: CompactionCall,
+    relay: RelayConfig | undefined,
   ): Promise<AssistantMessageEventStream> {
     const sessionId = options?.sessionId
     const sourceEstimate = compaction.sourceEstimate
@@ -589,7 +677,7 @@ export class OpenAICodexResponseRuntime {
     let response: CompactResponse | undefined
     let requestError: unknown
     try {
-      response = await this.requestNativeCompaction(model, context, options)
+      response = await this.requestNativeCompaction(model, context, options, relay)
     } catch (error) {
       response = undefined
       requestError = error
@@ -601,7 +689,7 @@ export class OpenAICodexResponseRuntime {
       this.decide(sessionId, isNativeProtocolError(requestError) ? 'invalid-response' : 'native-request-failed', {
         ...sourceEstimate === undefined ? {} : { sourceEstimate },
       })
-      return this.standardStream(provider, model, context, options, false)
+      return this.standardStream(provider, model, context, options, false, relay)
     }
     const nativeUsage = this.nativeRequestUsage(response.usage)
     let marker: string | undefined
@@ -616,7 +704,7 @@ export class OpenAICodexResponseRuntime {
         ...sourceEstimate === undefined ? {} : { sourceEstimate },
         ...nativeUsage === undefined ? {} : { nativeUsage },
       })
-      return this.standardStream(provider, model, context, options, false)
+      return this.standardStream(provider, model, context, options, false, relay)
     }
     const markerEstimate = this.markerEstimate(marker)
     const fits =
@@ -629,7 +717,7 @@ export class OpenAICodexResponseRuntime {
         ...markerEstimate === undefined ? {} : { markerEstimate },
         ...nativeUsage === undefined ? {} : { nativeUsage },
       })
-      return this.standardStream(provider, model, context, options, false)
+      return this.standardStream(provider, model, context, options, false, relay)
     }
     this.decide(sessionId, 'selected-native', {
       ...sourceEstimate === undefined ? {} : { sourceEstimate },
@@ -682,10 +770,13 @@ export class OpenAICodexResponseRuntime {
   private async requestNativeCompaction(
     model: Model<Api>,
     context: PiContext,
-    options?: SimpleStreamOptions,
+    options: SimpleStreamOptions | undefined,
+    relay: RelayConfig | undefined,
   ): Promise<CompactResponse> {
     const access = options?.apiKey
-    if (access === undefined || access.length === 0) throw new Error('OpenAI Codex compact request has no OAuth token')
+    if (relay === undefined && (access === undefined || access.length === 0)) {
+      throw new Error('OpenAI Codex compact request has no OAuth token')
+    }
     const messages = context.messages.length === 0 ? [] : context.messages.slice(0, -1)
     const input = expandNativeCompactionMarkers(convertResponsesMessages(
       model,
@@ -721,42 +812,58 @@ export class OpenAICodexResponseRuntime {
         ? {}
         : { reasoning: { effort: mappedEffort, summary: 'auto' } },
       ...options?.sessionId === undefined ? {} : { prompt_cache_key: options.sessionId },
+      ...(this.serviceTierOf(model, options?.sessionId) === undefined
+        ? {}
+        : { service_tier: this.serviceTierOf(model, options?.sessionId) }),
       text: { verbosity: 'low' },
     }
     if (options?.onPayload !== undefined) {
       body = await options.onPayload(body, model) ?? body
     }
     if (!isRecord(body)) throw new Error('OpenAI Codex generated a non-object compact Responses payload')
-    const headers = new Headers(model.headers)
-    for (const [key, value] of Object.entries(options?.headers ?? {})) {
-      if (value === null) headers.delete(key)
-      else headers.set(key, value)
+    // One frozen mode per generate step: a relay step uses the relay endpoint
+    // and static key only; a direct step keeps the official endpoint and OAuth.
+    const requestUrl = relay === undefined ? OPENAI_CODEX_RESPONSES_URL : relayResponsesUrl(relay.baseUrl)
+    const headers = relay === undefined ? new Headers(model.headers) : relayRequestHeaders(relay, model, options)
+    if (relay === undefined) {
+      for (const [key, value] of Object.entries(options?.headers ?? {})) {
+        if (value === null) headers.delete(key)
+        else headers.set(key, value)
+      }
+      headers.set('authorization', `Bearer ${access}`)
+      headers.set('chatgpt-account-id', accountIdFromToken(access as string))
+      headers.set('originator', 'dsh-codex')
+      headers.set('accept', 'text/event-stream')
+      headers.set('content-type', 'application/json')
+      headers.set('openai-beta', 'responses=experimental')
+      if (options?.sessionId !== undefined) {
+        headers.set('session-id', options.sessionId)
+        headers.set('thread-id', options.sessionId)
+        headers.set('x-client-request-id', options.sessionId)
+      }
+      headers.set('x-codex-routing-hint', `model=${model.id}`)
     }
-    headers.set('authorization', `Bearer ${access}`)
-    headers.set('chatgpt-account-id', accountIdFromToken(access))
-    headers.set('originator', 'dsh-codex')
-    headers.set('accept', 'text/event-stream')
-    headers.set('content-type', 'application/json')
-    headers.set('openai-beta', 'responses=experimental')
-    if (options?.sessionId !== undefined) {
-      headers.set('session-id', options.sessionId)
-      headers.set('thread-id', options.sessionId)
-      headers.set('x-client-request-id', options.sessionId)
-    }
-    headers.set('x-codex-routing-hint', `model=${model.id}`)
+    const send = relay === undefined ? (options?.fetch ?? this.requestFetch) : relayDirectFetch(this.relayDeps ?? {})
     const maxRetries = Math.min(MAX_NATIVE_COMPACTION_RETRIES, Math.max(0, options?.maxRetries ?? MAX_NATIVE_COMPACTION_RETRIES))
     let lastError: unknown
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       let response: Response
       try {
         const signal = requestSignal(options?.signal, options?.timeoutMs)
-        response = await (options?.fetch ?? this.requestFetch)(OPENAI_CODEX_RESPONSES_URL, {
+        response = await send(requestUrl, {
           method: 'POST',
           headers,
           body: JSON.stringify(body),
+          ...(relay === undefined ? {} : { redirect: 'manual' as const }),
           ...signal === undefined ? {} : { signal },
         })
       } catch (error: unknown) {
+        if (relay !== undefined && !(error instanceof RelayTransportError) && options?.signal?.aborted !== true) {
+          lastError = new RelayTransportError('relay-unavailable', 'relay request failed')
+          if (attempt === maxRetries) throw lastError
+          await waitForRetry(Math.min(4_000, 500 * 2 ** attempt), options?.signal)
+          continue
+        }
         if (options?.signal?.aborted === true || attempt === maxRetries) throw error
         lastError = error
         await waitForRetry(Math.min(4_000, 500 * 2 ** attempt), options?.signal)
@@ -764,6 +871,17 @@ export class OpenAICodexResponseRuntime {
       }
       await options?.onResponse?.({ status: response.status, headers: responseHeaders(response.headers) }, model)
       if (response.ok) return await compactResponse(response, retained)
+      if (relay !== undefined) {
+        // The upstream body is untrusted and may echo the relay key: never read
+        // or surface it, and never treat a redirect as a usable response.
+        const error = response.status === 0 || (response.status >= 300 && response.status < 400)
+          ? new RelayTransportError('relay-redirect', 'relay redirect refused')
+          : new RelayTransportError('relay-http', `relay request failed with HTTP ${response.status}`)
+        if (error.code === 'relay-redirect' || !retryableStatus(response.status) || attempt === maxRetries) throw error
+        lastError = error
+        await waitForRetry(retryDelayMs(response, attempt), options?.signal)
+        continue
+      }
       const detail = (await response.text()).slice(0, 1000)
       const error = new Error(`OpenAI Codex compact request failed with HTTP ${response.status}${detail.length === 0 ? '' : `: ${detail}`}`)
       if (!retryableStatus(response.status) || attempt === maxRetries) throw error

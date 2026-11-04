@@ -185,4 +185,52 @@ describe("ImageToolPolicy", () => {
     ).rejects.toThrow("http:// or https://");
     expect(policy.proxySnapshot()).toEqual({ proxyMode: "off", proxyUrl: "" });
   });
+
+  it("stores relay URL and key from one patch and keeps the key on URL-only updates", async () => {
+    const policy = new ImageToolPolicy();
+    context = attach(policy);
+
+    await policy.updateRelayPreferences({
+      relayBaseUrl: "https://relay.example.com/",
+      relayApiKey: "relay-secret",
+    });
+    expect(policy.relaySnapshot()).toEqual({
+      relayBaseUrl: "https://relay.example.com/",
+      relayApiKeySet: true,
+      enabled: true,
+    });
+    expect(policy.relayPreferences()).toEqual({
+      relayBaseUrl: "https://relay.example.com/",
+      relayApiKey: "relay-secret",
+    });
+
+    await policy.updateRelayPreferences({
+      relayBaseUrl: "https://relay2.example.com",
+    });
+    expect(policy.relaySnapshot()).toMatchObject({
+      relayBaseUrl: "https://relay2.example.com",
+      relayApiKeySet: true,
+      enabled: true,
+    });
+
+    await policy.updateRelayPreferences({ relayApiKey: "rotated" });
+    expect(policy.relaySnapshot()).toMatchObject({
+      relayBaseUrl: "https://relay2.example.com",
+      relayApiKeySet: true,
+    });
+    expect(policy.relayPreferences().relayApiKey).toBe("rotated");
+
+    await policy.updateRelayPreferences({ relayBaseUrl: "" });
+    expect(policy.relaySnapshot()).toMatchObject({ enabled: false, relayApiKeySet: true });
+  });
+
+  it("rejects an invalid relay base URL without persisting it", async () => {
+    const policy = new ImageToolPolicy();
+    context = attach(policy);
+
+    await expect(
+      policy.updateRelayPreferences({ relayBaseUrl: "relay.example.com" })
+    ).rejects.toMatchObject({ code: "invalid-base-url" });
+    expect(policy.relaySnapshot()).toMatchObject({ relayBaseUrl: "", enabled: false });
+  });
 });

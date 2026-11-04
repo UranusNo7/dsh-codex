@@ -93,6 +93,7 @@ import type {
 } from "./search.ts";
 import { OpenAICodexCredentialStore, OPENAI_CODEX_PROVIDER } from "./store.ts";
 import { OpenAICodexService } from "./service.ts";
+import { disposeRelayTransport } from "./relay-provider.ts";
 import { DEFAULT_PROXY_PREFERENCES } from "./proxy.ts";
 import type { OpenAICodexProxyMode } from "./proxy.ts";
 import {
@@ -274,6 +275,10 @@ export interface Config {
   proxyMode?: OpenAICodexProxyMode;
   /** HTTP(S) proxy URL; empty uses the launch environment. */
   proxyUrl?: string;
+  /** Third-party relay base URL; empty keeps direct Codex traffic. */
+  relayBaseUrl?: string;
+  /** Static key sent only to the relay endpoint; never surfaced by snapshots. */
+  relayApiKey?: string;
 }
 
 export const Config = z.object({
@@ -313,6 +318,8 @@ export const Config = z.object({
     .default(DEFAULT_PROXY_PREFERENCES.proxyMode)
     .volatile(),
   proxyUrl: z.string().default(DEFAULT_PROXY_PREFERENCES.proxyUrl).volatile(),
+  relayBaseUrl: z.string().default("").volatile(),
+  relayApiKey: z.string().role("secret").default("").volatile(),
 });
 
 /**
@@ -361,6 +368,8 @@ export function apply(ctx: Context, config: Config): void {
     automaticModelFallback: liveValue(config.automaticModelFallback, false),
     proxyMode: liveValue(config.proxyMode, DEFAULT_PROXY_PREFERENCES.proxyMode),
     proxyUrl: liveValue(config.proxyUrl, DEFAULT_PROXY_PREFERENCES.proxyUrl),
+    relayBaseUrl: liveValue(config.relayBaseUrl, ""),
+    relayApiKey: liveValue(config.relayApiKey, ""),
   });
   const service = new OpenAICodexService({
     ...(config.credentialFile === undefined ? {} : { credentialFile: config.credentialFile }),
@@ -569,8 +578,11 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(
     () => async () => {
       await service.dispose();
+      // The relay provider owns a module-level dispatcher and cached sockets;
+      // release them with the same plugin lifecycle, never from tests only.
+      disposeRelayTransport();
     },
-    "dsh-openai-codex: proxy transport"
+    "dsh-openai-codex: relay transport"
   );
   ctx.inject(["settings"], (settingsCtx) => {
     service.attachSettings(settingsCtx, settingsNamespace, ctx.fiber);
@@ -591,7 +603,9 @@ export function apply(ctx: Context, config: Config): void {
       () => imageTools.fastModeSnapshot().fastModeDefault,
       modelProvider,
       estimateCompactionText,
-      (decision) => diagnostics.recordDecision(decision)
+      (decision) => diagnostics.recordDecision(decision),
+      // Relay resolver: the adapter binds one mode snapshot per generate step.
+      () => service.relayConfig()
     )
   );
   ctx.effect(
@@ -613,6 +627,9 @@ export function apply(ctx: Context, config: Config): void {
         String(
           ctx.get("agents")?.currentInitiator()?.session.id ?? randomUUID()
         ),
+      // Relay mode has no standalone search; the provider refuses before any
+      // credential read or network call instead of falling back to direct.
+      relay: () => service.relayConfig(),
     })
   );
   ctx.inject(["webServer"], (webCtx) =>
@@ -638,7 +655,15 @@ export function apply(ctx: Context, config: Config): void {
   });
   ctx.inject(["tools", "fs", "attachments"], (toolCtx) => {
     toolCtx.tools.register(
-      imagegenTool(toolCtx, credentials, imageTools, service.proxy.fetch)
+      imagegenTool(
+        toolCtx,
+        credentials,
+        imageTools,
+        // Relay mode uses a dedicated direct dispatcher; direct traffic keeps
+        // the original proxy transport.
+        service.requestFetch,
+        () => service.relayConfig()
+      )
     );
   });
   ctx.inject(["tools", "fs", "attachments", "agents"], (toolCtx) => {

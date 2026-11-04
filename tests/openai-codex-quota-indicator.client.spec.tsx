@@ -4,7 +4,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ModelDirectoryState } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
-import { formatOpenAICodexResetAt } from '../src/client/OpenAICodexSettings.tsx'
+import { formatOpenAICodexResetAt, notifyRelayPreferencesChanged } from '../src/client/OpenAICodexSettings.tsx'
 import { OpenAICodexQuotaIndicator } from '../src/client/OpenAICodexQuotaIndicator.tsx'
 import { en } from '../src/client/locales.ts'
 import type { OpenAICodexSettingsKey } from '../src/client/locales.ts'
@@ -183,6 +183,49 @@ describe('OpenAI Codex Composer weekly quota', () => {
 
     render(<OpenAICodexQuotaIndicator directory={directory} t={t} />)
     await waitFor(() => { expect(fetchMock).toHaveBeenCalledOnce() })
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('hides for a relay auth status without querying usage', async () => {
+    const fetchMock = vi.fn(async () => json({
+      status: 'relay',
+      relay: {
+        relayBaseUrl: 'https://relay.example.com/v1',
+        relayApiKeySet: true,
+        enabled: true,
+      },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const directory = directoryStore(directoryState('gpt-5'))
+
+    render(<OpenAICodexQuotaIndicator directory={directory} t={t} />)
+    await waitFor(() => { expect(fetchMock).toHaveBeenCalledOnce() })
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('clears an already-visible quota immediately on a relay mode change', async () => {
+    let relay = false
+    const fetchMock = vi.fn(async () => json(
+      relay
+        ? {
+            status: 'relay',
+            relay: {
+              relayBaseUrl: 'https://relay.example.com/v1',
+              relayApiKeySet: true,
+              enabled: true,
+            },
+          }
+        : { status: 'signed-in', usage: usage() },
+    ))
+    vi.stubGlobal('fetch', fetchMock)
+    const directory = directoryStore(directoryState('gpt-5'))
+
+    render(<OpenAICodexQuotaIndicator directory={directory} t={t} />)
+    await screen.findByRole('status')
+    relay = true
+    notifyRelayPreferencesChanged()
+    await waitFor(() => { expect(screen.queryByRole('status')).toBeNull() })
+    await waitFor(() => { expect(fetchMock).toHaveBeenCalledTimes(2) })
     expect(screen.queryByRole('status')).toBeNull()
   })
 

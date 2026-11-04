@@ -15,6 +15,7 @@ import type {
 } from '@deepseek-ai/dsh-web'
 import type { OpenAICodexCredentialStore } from './store.ts'
 import { OPENAI_CODEX_PROVIDER } from './store.ts'
+import type { RelayResolver } from './relay.ts'
 
 /** Stable dsh web-provider id selected by the bundle patch. */
 export const OPENAI_CODEX_SEARCH_PROVIDER = OPENAI_CODEX_PROVIDER
@@ -88,6 +89,12 @@ export interface OpenAICodexSearchProviderOptions {
   readonly resolveRequestId: () => string
   /** Record the exact secret-free request before dispatch. */
   readonly recordRequest?: (request: OpenAICodexSearchRequestRecord) => void
+  /**
+   * Optional static-key relay resolver. A configured relay has no standalone
+   * search, so the provider refuses instead of reading OAuth credentials or
+   * falling back to direct traffic.
+   */
+  readonly relay?: RelayResolver
 }
 
 /** Convert the configured mode to the official endpoint field. */
@@ -248,6 +255,23 @@ export class OpenAICodexSearchProvider implements WebSearchProvider {
   /** @inheritdoc */
   async search(request: WebSearchRequest, signal?: AbortSignal): Promise<WebSearchResult> {
     throwIfSearchAborted(signal)
+    // Relay mode has no standalone search. Refuse before reading credentials or
+    // reaching the network, and never silently fall back to direct traffic.
+    if (this.options.relay !== undefined) {
+      let relayActive: boolean
+      try {
+        relayActive = this.options.relay() !== undefined
+      } catch {
+        // A configured but invalid relay is still relay mode, not direct.
+        relayActive = true
+      }
+      if (relayActive) {
+        throw new WebError(
+          'OpenAI Codex relay mode does not support standalone search; disable the relay base URL to use direct search',
+          'WEB_PROVIDER_UNSUPPORTED',
+        )
+      }
+    }
     let auth
     try {
       auth = await abortable(this.models.getAuth(OPENAI_CODEX_PROVIDER), signal)

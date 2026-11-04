@@ -6,7 +6,7 @@
 
 | 路径 | 职责 |
 | --- | --- |
-| `src/` | 插件源码：`index.ts` 组合入口；`adapter.ts` 模型适配；`auth*.ts`/`oauth-*.ts`/`store.ts` 账号与凭据；`auth-routes.ts` 设置/登录路由；`model-catalog.ts`/`model-catalog-remote.ts` 模型目录与官方目录客户端；`proxy.ts` 代理与连通性探测；`search*.ts` 搜索；`image*.ts`/`read-image-enhancement.ts` 图像；`tool-policy.ts`/`tool-compat.ts` 工具策略与兼容；`net-proxy/index.js` 内置出网代理；`tui.ts` 终端入口。 |
+| `src/` | 插件源码：`index.ts` 组合入口；`adapter.ts` 模型适配；`auth*.ts`/`oauth-*.ts`/`store.ts` 账号与凭据；`auth-routes.ts` 设置/登录路由；`relay.ts` 第三方中继配置与安全解析；`model-catalog.ts`/`model-catalog-remote.ts` 模型目录与官方目录客户端；`proxy.ts` 代理与连通性探测；`search*.ts` 搜索；`image*.ts`/`read-image-enhancement.ts` 图像；`tool-policy.ts`/`tool-compat.ts` 工具策略与兼容；`net-proxy/index.js` 内置出网代理；`tui.ts` 终端入口。 |
 | `src/client/` | Web 设置页与客户端 UI（`OpenAICodexSettings.tsx`、locales 等），经 `lib/client.js` 注入。 |
 | `tests/` | Vitest 单元/集成测试；`tests/fixtures/` 为静态测试数据。 |
 | `docs/` | 设计与行为文档（`design*`、`session-repair*`、`third-party-notices.md`、`standalone.md` 等），随 `files: docs` 发包。 |
@@ -178,3 +178,43 @@
   的视觉待用户确认。不承诺普遍 HMR（无 `dev:web` watcher）。本次字号/客户端作用域修复未改 Host
   产品/协议/依赖/profile；未发布。诊断 domain/key 与后端合同不符（本轮未改）：实际可能仅内存，重启后恢复不保证，核心会话历史
   不受影响。
+
+## 第三方中继（本轮源码，未发布）
+
+- `src/relay.ts`：中继配置与安全契约。`RelayPreferences`（`relayBaseUrl`/`relayApiKey`）、
+  `RelaySnapshot`（`relayBaseUrl`/`relayApiKeySet`/`enabled`，不含 Key）、`RelayConfig`、
+  `RelayResolver = () => RelayConfig | undefined`；地址规范化只允许 `https`（本机回环允许 `http`），
+  拒绝内嵌凭据/query/fragment 并去掉末尾斜杠；有地址缺 Key 抛固定错误，不回落 OAuth；另有
+  `RelayUsageUnsupportedError` 固定不支持错误。
+- `src/service.ts`：新增 `relaySnapshot()`/`relayConfig()`/`updateRelayPreferences()`；relay 模式在
+  发请求前拒绝额度读取、禁用官方目录预热/刷新并隔离旧账号缓存、模型回退不读取旧 OAuth 额度；
+  `requestFetch` 在 relay 下使用独立 undici Agent（不经过内置代理的托管范围），直连保持原 `proxy.fetch`。
+- `src/relay-provider.ts`（新增）：仅中继使用的 Codex Responses 传输。直接实现同一 wire protocol 的
+  SSE 与 WebSocket：静态 Bearer、不解析 JWT、不发送 account/cookie、`redirect: "manual"` 拒绝跨 origin，
+  上游错误固定分类且不回显正文；WS 以 endpoint+Key 哈希+session 为身份复用同一连接，连接不可用且尚未
+  输出事件前回退 SSE（固定提示）；模块级 dispatcher 与 socket 缓存随插件 lifecycle 释放。
+- `src/adapter.ts` / `src/responses.ts`：`createOpenAICodexAdapter` 末尾可选 relay resolver 与 relay
+  传输 deps，`OpenAICodexResponseRuntime` 末尾可选 resolver/deps 与 Fast Mode 查询；每个 generate step
+  只冻结一次 relay 决策，使认证、transport 与 native 压缩请求观察同一模式；`store: false`、
+  `service_tier`、`compaction_trigger` 与直连走同一 responses 路径；relay 步骤用占位 Key 绕过 OAuth
+  解析，第一方 access 与 relay Key 互不跨端。
+- `src/index.ts`：schema 增加 `relayBaseUrl`/`relayApiKey`（后者 `.role("secret")`，均 volatile/live），
+  以 resolver 形式接线 adapter、独立搜索、`imagegen`；插件销毁时释放 relay 传输资源。
+- `src/search.ts`：搜索 options 新增可选 `relay` resolver；relay 模式在读取凭据/触网前以固定
+  `WEB_PROVIDER_UNSUPPORTED` 拒绝，不静默回退直连；direct 端点与鉴权不变。
+- `src/imagegen.ts`：`OpenAICodexImageClient` 与 `imagegenTool` 末尾新增可选 relay resolver；relay 下
+  改发 `<base>/images/generations|edits`，静态 Key、无 account 头、`redirect: "error"`，上游错误只返回
+  固定 HTTP 状态且不附带正文 cause；direct 分支保持原字面端点与 OAuth 头。
+- `src/auth-routes.ts`：受既有授权保护的新路由 `GET/POST /plugins/dsh-openai-codex/relay`（只返回安全
+  快照，保存失败映射 `invalid-base-url`/`missing-api-key`）；auth-status 在 relay 模式返回
+  `{ status: "relay", relay }`，不查询 OAuth/额度。
+- `src/client/OpenAICodexSettings.tsx` / `src/client/locales.ts` / `src/client/OpenAICodexQuotaIndicator.tsx`：
+  中继设置卡片（Key 写后不回显、清空 URL 回直连、可单独清除已存 Key、保存后通知同页刷新）；relay 模式
+  隐藏额度指示。
+- 测试：`tests/relay.spec.ts`（配置/解析/快照/不支持错误）、`tests/relay-transport.spec.ts`（SSE/WS
+  传输、重定向拒绝、错误脱敏、socket 复用）、`tests/relay-integration.spec.ts`（中继验收 runner，仅
+  test-only）；`tests/search.spec.ts`/`tests/imagegen.spec.ts` 的 relay 隔离回归；`tests/adapter.spec.ts`、
+  `tests/response-runtime.spec.ts`、`tests/codex-compaction.spec.ts` 的 relay 传输/压缩回归；设置路由、
+  服务、客户端与 TUI 覆盖由对应测试补充。
+- 仅存在于当前源码，未包含在已发布 `v0.3.3-standalone.3` 中；未发布，宿主需下次重启后加载。行为与
+  限制见 [relay.md](./relay.md)。

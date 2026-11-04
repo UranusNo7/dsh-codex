@@ -158,6 +158,17 @@ Web 设置中的网络代理入口现在仅提供内置代理（见 [内置出�
 
 当前源码不再创建或修改全局 `AGENTS.md` 或 `.AGENTS.md` 规则文件。旧 `writeMemory` 字段已无效，不能启用规则写入；面向 AI 代理的说明仅由现有 `local_network_proxy` 工具提供，工具定义未改变。已有的全局规则文件保持原样，不会被自动编辑或删除。该改动不在已发布的 `v0.3.3-standalone.3` 资源中，运行中的宿主需在下次重启后加载。
 
+## 第三方中继
+
+插件可以把 Codex 流量发送到兼容的第三方中继，而不是 OpenAI 的直连端点。在 **设置 → OpenAI Codex** 的 **中继** 卡片中配置：
+
+- **中继地址** 填完整的 Codex 端点，例如 `https://relay.example.com/backend-api/codex`。末尾斜杠会被忽略；明文 `http://` 仅允许本机回环地址（`localhost`、`127.0.0.1`、`::1`）用于本地测试；包含用户名密码、query 或 fragment 的地址会被拒绝。
+- **中继 API Key** 随插件设置保存，且不会返回给浏览器。设置页只显示是否已配置 Key，已保存的 Key 不会回显；Key 输入框留空保存时会保留原 Key。
+- 地址留空即为直连模式。清空地址会回到直连；仅保存了 Key 不会启用中继。
+- 有地址但缺 Key 时仍属于中继模式，不会当成直连：中继请求会以固定配置错误失败，不会回落到 OAuth 或直连端点。
+
+中继流量只发送静态 Key，且只发往配置的 origin。中继请求不读取 OAuth 凭据、不解析账号 ID、不发送 `chatgpt-account-id`；OAuth token 永远不会发给中继。中继模式没有账号额度，额度读取会以固定错误拒绝，输入框额度指示同时隐藏；设置页改为显示中继模式。中继模式不获取第一方 OAuth 模型目录，只沿用插件本地内置与缓存元数据作为候选。中继实际提供哪些模型由中继决定；插件不会自动发现中继模型，也不保证候选中的每个模型在中继可用。`web_search` 不支持中继下的独立搜索，会以固定“不支持”错误拒绝。`imagegen` 使用已选的 GPT Image 模型请求 `<中继地址>/images/generations` 与 `<中继地址>/images/edits`。中继流量使用独立的直连 dispatcher，不经过内置出网代理。请求形态保持不变：`store: false`、Fast Mode priority 与原生压缩的 `compaction_trigger` 流程均与直连一致。中继也支持 WebSocket 上下文复用：真实中继实测中两轮复用了同一连接，未回退 SSE。也可以在 `llm-openai-codex` 条目中通过 `relayBaseUrl` 与 `relayApiKey` 预置同样的值。该能力仅存在于当前源码，未包含在已发布的 `v0.3.3-standalone.3` 中；运行中的宿主需在下次重启后加载，之后即可在 Web 设置中配置中继。细节、限制与验收记录见 [docs/relay.md](docs/relay.md)。
+
 ## 图片
 
 图片功能使用 dsh 的持久附件路径：

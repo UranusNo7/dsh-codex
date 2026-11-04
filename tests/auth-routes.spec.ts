@@ -16,6 +16,7 @@ import {
   OPENAI_CODEX_MODEL_CATALOG_REFRESH_PATH,
   OPENAI_CODEX_MODEL_FALLBACK_SETTINGS_PATH,
   OPENAI_CODEX_PROXY_SETTINGS_PATH,
+  OPENAI_CODEX_RELAY_SETTINGS_PATH,
   REMOTE_WEB_ORIGIN_NOT_TRUSTED,
   registerOpenAICodexAuthRoutes,
   trustedRequestDecision,
@@ -92,6 +93,19 @@ function captureRoutes(
     refreshModelCatalog?(force: boolean): Promise<ModelCatalogSettings>
     adoptModelCatalogAccount?(): void
     clearModelCatalogAccount?(): void
+    relaySnapshot?(): {
+      relayBaseUrl: string
+      relayApiKeySet: boolean
+      enabled: boolean
+    }
+    updateRelayPreferences?(patch: Partial<{
+      relayBaseUrl: string
+      relayApiKey: string
+    }>): Promise<{
+      relayBaseUrl: string
+      relayApiKeySet: boolean
+      enabled: boolean
+    }>
   },
 ): CapturedRoute[] {
   const routes: CapturedRoute[] = []
@@ -706,6 +720,165 @@ describe('OpenAI Codex Web OAuth boundary', () => {
       quotaError: 'OpenAI Codex usage request failed with HTTP 503',
     })
     expect(mocked.logout).not.toHaveBeenCalled()
+  })
+})
+
+describe('relay Web settings and relay auth status', () => {
+  function relayControls() {
+    let current = {
+      relayBaseUrl: 'https://relay.example.com/v1',
+      relayApiKey: 'relay-test-key',
+    }
+    const snapshot = () => ({
+      relayBaseUrl: current.relayBaseUrl,
+      relayApiKeySet: current.relayApiKey.length > 0,
+      enabled: current.relayBaseUrl.length > 0,
+    })
+    const relaySnapshot = vi.fn(snapshot)
+    const updateRelayPreferences = vi.fn(async (patch: Partial<typeof current>) => {
+      current = { ...current, ...patch }
+      return snapshot()
+    })
+    return {
+      relaySnapshot,
+      updateRelayPreferences,
+      current: () => current,
+      proxySettings: {
+        proxyPreferences: () => ({ proxyMode: 'off' as const, proxyUrl: '' }),
+        updateProxyPreferences: async (patch: Partial<{ proxyMode: 'off' | 'scoped' | 'global'; proxyUrl: string }>) =>
+          ({ proxyMode: patch.proxyMode ?? 'off', proxyUrl: patch.proxyUrl ?? '' }),
+        relaySnapshot,
+        updateRelayPreferences,
+      },
+    }
+  }
+
+  it('returns relay auth status before OAuth or usage and keeps direct status unchanged', async () => {
+    const relay = relayControls()
+    const relayed = captureRoutes(emptyTrustedOrigins, undefined, relay.proxySettings)
+      .find(route => route.path === OPENAI_CODEX_AUTH_STATUS_PATH)
+    if (relayed === undefined) throw new Error('status route was not registered')
+    const relayResponse = response()
+    await relayed.handler(request({}), relayResponse)
+    expect(relayResponse.observed.status).toBe(200)
+    expect(JSON.parse(relayResponse.observed.body ?? 'null')).toEqual({
+      status: 'relay',
+      relay: {
+        relayBaseUrl: 'https://relay.example.com/v1',
+        relayApiKeySet: true,
+        enabled: true,
+      },
+    })
+    expect(mocked.status).not.toHaveBeenCalled()
+    expect(mocked.usage).not.toHaveBeenCalled()
+
+    const direct = relayControls()
+    direct.updateRelayPreferences({ relayBaseUrl: '' })
+    const directRoute = captureRoutes(emptyTrustedOrigins, undefined, direct.proxySettings)
+      .find(route => route.path === OPENAI_CODEX_AUTH_STATUS_PATH)
+    if (directRoute === undefined) throw new Error('status route was not registered')
+    const directResponse = response()
+    await directRoute.handler(request({}), directResponse)
+    expect(JSON.parse(directResponse.observed.body ?? 'null')).toEqual({ status: 'signed-out' })
+    expect(mocked.status).toHaveBeenCalled()
+  })
+
+  it('serves only safe relay snapshots and validates writes without echoing keys', async () => {
+    const relay = relayControls()
+    const route = captureRoutes(emptyTrustedOrigins, undefined, relay.proxySettings)
+      .find(candidate => candidate.path === OPENAI_CODEX_RELAY_SETTINGS_PATH)
+    if (route === undefined) throw new Error('relay route was not registered')
+
+    const getResponse = response()
+    await route.handler(request({}), getResponse)
+    expect(JSON.parse(getResponse.observed.body ?? 'null')).toEqual({
+      relayBaseUrl: 'https://relay.example.com/v1',
+      relayApiKeySet: true,
+      enabled: true,
+    })
+    expect(getResponse.observed.body).not.toContain('relay-test-key')
+
+    const saveResponse = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({
+        relayBaseUrl: 'https://relay2.example.com/v1',
+        relayApiKey: 'relay-test-key-2',
+      }),
+    }), saveResponse)
+    expect(saveResponse.observed.status).toBe(200)
+    expect(relay.current()).toEqual({
+      relayBaseUrl: 'https://relay2.example.com/v1',
+      relayApiKey: 'relay-test-key-2',
+    })
+    expect(saveResponse.observed.body).not.toContain('relay-test-key-2')
+
+    const keepKey = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ relayBaseUrl: 'https://relay3.example.com/v1' }),
+    }), keepKey)
+    expect(relay.current().relayApiKey).toBe('relay-test-key-2')
+
+    const clear = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ relayBaseUrl: '', relayApiKey: '' }),
+    }), clear)
+    expect(clear.observed.status).toBe(200)
+    expect(JSON.parse(clear.observed.body ?? 'null')).toEqual({
+      relayBaseUrl: '',
+      relayApiKeySet: false,
+      enabled: false,
+    })
+
+    const invalid = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ relayApiKey: 42 }),
+    }), invalid)
+    expect(invalid.observed.status).toBe(400)
+    expect(invalid.observed.body).not.toContain('relay-test-key')
+  })
+
+  it('maps relay validation failures to fixed safe codes and protects writes with authorize', async () => {
+    const relay = relayControls()
+    relay.updateRelayPreferences.mockRejectedValueOnce(
+      Object.assign(new Error('internal relay URL detail'), { code: 'invalid-base-url' })
+    )
+    const route = captureRoutes(emptyTrustedOrigins, undefined, relay.proxySettings)
+      .find(candidate => candidate.path === OPENAI_CODEX_RELAY_SETTINGS_PATH)
+    if (route === undefined) throw new Error('relay route was not registered')
+
+    const failed = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ relayBaseUrl: 'not-a-url' }),
+    }), failed)
+    expect(failed.observed.status).toBe(400)
+    expect(JSON.parse(failed.observed.body ?? 'null')).toEqual({ error: 'invalid-base-url' })
+    expect(failed.observed.body).not.toContain('internal relay URL detail')
+
+    relay.updateRelayPreferences.mockRejectedValueOnce(
+      Object.assign(new Error('internal api key detail'), { code: 'invalid-api-key' })
+    )
+    const badKey = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ relayApiKey: 'bad key' }),
+    }), badKey)
+    expect(badKey.observed.status).toBe(400)
+    expect(JSON.parse(badKey.observed.body ?? 'null')).toEqual({ error: 'invalid-api-key' })
+    expect(badKey.observed.body).not.toContain('bad key')
+
+    const untrusted = response()
+    await route.handler(request({
+      method: 'POST',
+      remoteAddress: '203.0.113.9',
+      body: JSON.stringify({ relayBaseUrl: 'https://relay.example.com' }),
+    }), untrusted)
+    expect(untrusted.observed.status).toBe(403)
+    expect(relay.updateRelayPreferences).toHaveBeenCalledTimes(2)
   })
 })
 

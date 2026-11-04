@@ -22,6 +22,7 @@ import type { ImageToolPolicy } from './tool-policy.ts'
 import { DEFAULT_OPENAI_CODEX_IMAGE_MODEL } from './image-model.ts'
 import type { OpenAICodexImageModel } from './image-model.ts'
 import { OPENAI_CODEX_MESSAGE_SOURCE } from './message-source.ts'
+import type { RelayResolver } from './relay.ts'
 
 /** Stable Codex-compatible tool name. */
 export const IMAGEGEN_TOOL_NAME = 'imagegen'
@@ -122,10 +123,14 @@ export class OpenAICodexImageClient {
   /**
    * @param credentials - shared refreshable OAuth store.
    * @param requestFetch - request transport used after credentials resolve.
+   * @param relay - optional static-key relay resolver; when it returns a config,
+   *   the OAuth store is never read and the fixed first-party endpoints are not
+   *   used.
    */
   constructor(
     credentials: OpenAICodexCredentialStore,
     private readonly requestFetch: typeof globalThis.fetch = globalThis.fetch,
+    private readonly relay?: RelayResolver,
   ) {
     const models = createModels({ credentials })
     models.setProvider(openaiCodexProvider(requestFetch))
@@ -140,11 +145,8 @@ export class OpenAICodexImageClient {
     model: OpenAICodexImageModel = OPENAI_CODEX_IMAGE_MODEL,
   ): Promise<Uint8Array> {
     throwIfAborted(signal)
-    const auth = await abortable(this.models.getAuth(OPENAI_CODEX_PROVIDER), signal)
-    const access = auth?.auth.apiKey
-    if (access === undefined || access.length === 0) {
-      throw new Error('OpenAI Codex image generation is signed out; run "dsh openai-codex login"')
-    }
+    // A configured relay replaces the OAuth route entirely; the two never mix.
+    const relay = this.relay?.()
     const endpoint = images.length === 0
       ? OPENAI_CODEX_IMAGE_GENERATIONS_URL
       : OPENAI_CODEX_IMAGE_EDITS_URL
@@ -157,31 +159,69 @@ export class OpenAICodexImageClient {
       size: 'auto',
     }
     let response: Response
-    try {
-      response = await this.requestFetch(endpoint, {
-        method: 'POST',
-        redirect: 'error',
-        headers: {
-          authorization: `Bearer ${access}`,
-          'chatgpt-account-id': accountIdFromToken(access),
-          'content-type': 'application/json',
-          accept: 'application/json',
-          originator: 'deepseek-harness',
-        },
-        body: JSON.stringify(body),
-        signal,
-      })
-    } catch (error: unknown) {
-      throwIfAborted(signal)
-      throw new Error('OpenAI Codex image request failed', { cause: error })
+    if (relay !== undefined) {
+      // Static relay key only: no OAuth read, JWT parse, or account header.
+      const relayEndpoint = `${relay.baseUrl}${images.length === 0 ? '/images/generations' : '/images/edits'}`
+      try {
+        response = await this.requestFetch(relayEndpoint, {
+          method: 'POST',
+          redirect: 'error',
+          headers: {
+            authorization: `Bearer ${relay.apiKey}`,
+            'content-type': 'application/json',
+            accept: 'application/json',
+            originator: 'deepseek-harness',
+          },
+          body: JSON.stringify(body),
+          signal,
+        })
+      } catch {
+        // A relay transport error may quote third-party text, so relay failures
+        // keep no cause; abort still rethrows its original reason.
+        throwIfAborted(signal)
+        throw new Error('OpenAI Codex image request failed')
+      }
+    } else {
+      const auth = await abortable(this.models.getAuth(OPENAI_CODEX_PROVIDER), signal)
+      const access = auth?.auth.apiKey
+      if (access === undefined || access.length === 0) {
+        throw new Error('OpenAI Codex image generation is signed out; run "dsh openai-codex login"')
+      }
+      try {
+        response = await this.requestFetch(endpoint, {
+          method: 'POST',
+          redirect: 'error',
+          headers: {
+            authorization: `Bearer ${access}`,
+            'chatgpt-account-id': accountIdFromToken(access),
+            'content-type': 'application/json',
+            accept: 'application/json',
+            originator: 'deepseek-harness',
+          },
+          body: JSON.stringify(body),
+          signal,
+        })
+      } catch (error: unknown) {
+        throwIfAborted(signal)
+        throw new Error('OpenAI Codex image request failed', { cause: error })
+      }
     }
     let payload: unknown
     try {
       payload = await response.json()
     } catch (error: unknown) {
+      if (relay !== undefined) {
+        // A parse error can quote the body, so relay failures keep no cause.
+        throw new Error(`OpenAI Codex returned an unprocessable image response (HTTP ${response.status})`)
+      }
       throw new Error(`OpenAI Codex returned an unprocessable image response (HTTP ${response.status})`, { cause: error })
     }
     if (!response.ok) {
+      // A relay may echo the request, including its key, in the error body, so
+      // relay failures report only the fixed HTTP status.
+      if (relay !== undefined) {
+        throw new Error(`OpenAI Codex relay image request failed (HTTP ${response.status})`)
+      }
       const detail = providerMessage(payload)
       const message = detail === undefined
         ? `OpenAI Codex image request failed (HTTP ${response.status})`
@@ -305,8 +345,9 @@ export function imagegenTool(
   credentials: OpenAICodexCredentialStore,
   policy: ImageToolPolicy,
   requestFetch: typeof globalThis.fetch = globalThis.fetch,
+  relay?: RelayResolver,
 ): ToolDefinition {
-  const client = new OpenAICodexImageClient(credentials, requestFetch)
+  const client = new OpenAICodexImageClient(credentials, requestFetch, relay)
   return defineTool({
     name: IMAGEGEN_TOOL_NAME,
     description: 'Generate or edit an image with the GPT Image backend selected in OpenAI Codex settings. Omit both reference fields for a new image. Use referenced_image_paths for workspace files, or num_last_images_to_include for attached, viewed, or previously generated conversation images. Never provide both. Multiple images keep chronological/path-array order; identify them as Image 1, Image 2, and so on in the prompt. The generated PNG is always saved in the active local or Remote SSH workspace; output_path chooses its location, otherwise a unique generated-<timestamp>-<id>.png name is used.',

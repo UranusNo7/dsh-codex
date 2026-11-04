@@ -46,6 +46,34 @@ export const en = {
   fastModeDefaultHint:
     "When enabled, every conversation uses 1.5× speed with faster quota consumption, without toggling the per-conversation ⚡ switch.",
   fastModeSettingsFailed: "Fast Mode settings could not be saved.",
+  relayTitle: "Relay",
+  relayIntro:
+    "Route Codex requests through a compatible relay endpoint instead of direct OpenAI requests. Leave the relay URL blank for direct mode.",
+  relayModeDirect: "Direct mode",
+  relayModeRelay: "Relay mode",
+  relayModeActiveHint:
+    "Relay mode is active. OAuth account and usage limits are not queried while relay mode is configured.",
+  relayKeyConfigured: "API key configured",
+  relayKeyNotConfigured: "No API key configured",
+  relayBaseUrl: "Relay base URL",
+  relayBaseUrlPlaceholder: "https://relay.example.com/v1",
+  relayApiKey: "Relay API key",
+  relayApiKeyPlaceholder: "Enter API key",
+  relayApiKeyKeepHint:
+    "Leave the API key blank to keep the saved key. Saving an explicit empty key clears it.",
+  relaySave: "Save relay",
+  relaySaving: "Saving…",
+  relayClearUrl: "Use direct connection",
+  relayClearKey: "Clear saved key",
+  relayHint:
+    "When a relay URL is set, Codex traffic uses it with the saved API key. Clearing the URL returns to direct mode.",
+  relayInvalidBaseUrl:
+    "Enter a valid HTTPS relay URL. Loopback HTTP is allowed for local testing.",
+  relayInvalidApiKey:
+    "The relay API key contains characters that are not safe in an HTTP header.",
+  relayMissingApiKey: "Set a relay API key before using relay mode.",
+  relaySettingsFailed: "Relay settings could not be saved.",
+  relayLoadFailed: "Relay settings could not be loaded.",
   modelFallback: "Automatic model fallback",
   modelFallbackIntro:
     "Keep a conversation moving when OpenAI authorizes another model for this account.",
@@ -384,6 +412,34 @@ export const zh: { [Key in OpenAICodexSettingsKey]: string } = {
   fastModeDefaultHint:
     "开启后所有会话默认使用 1.5 倍速，额度消耗更快，无需逐会话点击 ⚡ 开关。",
   fastModeSettingsFailed: "无法保存 Fast Mode 设置。",
+  relayTitle: "中继",
+  relayIntro:
+    "通过兼容的中继地址发送 Codex 请求，而不是直接请求 OpenAI。中继地址留空表示直连模式。",
+  relayModeDirect: "直连模式",
+  relayModeRelay: "中继模式",
+  relayModeActiveHint:
+    "中继模式已启用；配置中继期间不会查询 OAuth 账号或额度。",
+  relayKeyConfigured: "API Key 已配置",
+  relayKeyNotConfigured: "未配置 API Key",
+  relayBaseUrl: "中继地址",
+  relayBaseUrlPlaceholder: "https://relay.example.com/v1",
+  relayApiKey: "中继 API Key",
+  relayApiKeyPlaceholder: "输入 API Key",
+  relayApiKeyKeepHint:
+    "API Key 留空会保留已保存的 Key；明确保存空 Key 才会清除。",
+  relaySave: "保存中继",
+  relaySaving: "正在保存…",
+  relayClearUrl: "切换直连",
+  relayClearKey: "清除已保存 Key",
+  relayHint:
+    "设置中继地址后，Codex 流量会使用该地址和已保存的 API Key；清空地址即回到直连。",
+  relayInvalidBaseUrl:
+    "请输入有效的 HTTPS 中继地址；本机回环地址允许使用 HTTP 测试。",
+  relayInvalidApiKey:
+    "中继 API Key 含有不能安全用于 HTTP 请求头的字符。",
+  relayMissingApiKey: "使用中继模式前请配置 API Key。",
+  relaySettingsFailed: "无法保存中继设置。",
+  relayLoadFailed: "无法加载中继设置。",
   modelFallback: "自动模型回退",
   modelFallbackIntro:
     "当 OpenAI 明确为当前账号授权其他模型时，让会话自动继续。",

@@ -14,6 +14,7 @@ import SessionProjectionRuntime from '@deepseek-ai/dsh-session-projection'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import * as OpenAICodex from '../src/index.ts'
+import { imagegenTool } from '../src/imagegen.ts'
 
 const PNG_1X1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', 'base64')
 const signal = new AbortController().signal
@@ -301,5 +302,146 @@ describe('imagegen', () => {
     expect(result.content.some(block => block.type === 'image')).toBe(true)
     expect(result.content.find(block => block.type === 'text')?.text).toContain('read-only mode')
     await expect(readFile(join(workspace, 'blocked.png'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+})
+
+describe('imagegen relay mode', () => {
+  const RELAY_BASE = 'https://relay.example.test/v1'
+  const RELAY_KEY = 'relay-test-key'
+
+  interface RelayFetch {
+    mock: ReturnType<typeof vi.fn>
+    calls: Array<[string, RequestInit]>
+  }
+
+  function relayFetch(): RelayFetch {
+    const calls: Array<[string, RequestInit]> = []
+    const mock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      calls.push([String(input), init ?? {}])
+      return new Response(JSON.stringify({
+        data: [{ b64_json: PNG_1X1.toString('base64') }],
+      }), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    return { mock, calls }
+  }
+
+  it('generates through the configured relay with the static key only', async () => {
+    const { mock: requestFetch, calls } = relayFetch()
+    const store = new OpenAICodex.OpenAICodexCredentialStore()
+    const read = vi.spyOn(store, 'read')
+    const client = new OpenAICodex.OpenAICodexImageClient(
+      store,
+      requestFetch as unknown as typeof globalThis.fetch,
+      () => ({ baseUrl: RELAY_BASE, apiKey: RELAY_KEY }),
+    )
+
+    await expect(client.generate('A tiny red pixel', [], signal)).resolves.toEqual(PNG_1X1)
+
+    expect(read).not.toHaveBeenCalled()
+    expect(calls).toHaveLength(1)
+    const [url, init] = calls[0] as [string, RequestInit]
+    expect(url).toBe(`${RELAY_BASE}/images/generations`)
+    expect(init).toMatchObject({ method: 'POST', redirect: 'error' })
+    const headers = new Headers(init.headers)
+    expect(headers.get('authorization')).toBe(`Bearer ${RELAY_KEY}`)
+    expect(headers.get('chatgpt-account-id')).toBeNull()
+    expect(JSON.parse(init.body as string)).toEqual({
+      prompt: 'A tiny red pixel',
+      background: 'auto',
+      model: OpenAICodex.OPENAI_CODEX_IMAGE_MODEL,
+      quality: 'auto',
+      size: 'auto',
+    })
+  })
+
+  it('uses the relay edits endpoint for reference images', async () => {
+    const { mock: requestFetch, calls } = relayFetch()
+    const client = new OpenAICodex.OpenAICodexImageClient(
+      new OpenAICodex.OpenAICodexCredentialStore(),
+      requestFetch as unknown as typeof globalThis.fetch,
+      () => ({ baseUrl: RELAY_BASE, apiKey: RELAY_KEY }),
+    )
+
+    await expect(client.generate(
+      'Edit this image',
+      [`data:image/png;base64,${PNG_1X1.toString('base64')}`],
+      signal,
+    )).resolves.toEqual(PNG_1X1)
+
+    expect(calls[0]?.[0]).toBe(`${RELAY_BASE}/images/edits`)
+  })
+
+  it('reports only a fixed status when relay upstream echoes the key', async () => {
+    const requestFetch = vi.fn(async () => new Response(JSON.stringify({
+      error: { message: `upstream rejected ${RELAY_KEY}` },
+    }), { status: 401, headers: { 'content-type': 'application/json' } }))
+    const client = new OpenAICodex.OpenAICodexImageClient(
+      new OpenAICodex.OpenAICodexCredentialStore(),
+      requestFetch as unknown as typeof globalThis.fetch,
+      () => ({ baseUrl: RELAY_BASE, apiKey: RELAY_KEY }),
+    )
+
+    const error = await client.generate('A tiny red pixel', [], signal).catch((caught: unknown) => caught)
+
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toBe('OpenAI Codex relay image request failed (HTTP 401)')
+    expect(`${(error as Error).message}${String((error as Error).cause ?? '')}`).not.toContain(RELAY_KEY)
+
+    const htmlFetch = vi.fn(async () => new Response(`<html>${RELAY_KEY}</html>`, {
+      status: 502,
+      headers: { 'content-type': 'text/html' },
+    }))
+    const htmlClient = new OpenAICodex.OpenAICodexImageClient(
+      new OpenAICodex.OpenAICodexCredentialStore(),
+      htmlFetch as unknown as typeof globalThis.fetch,
+      () => ({ baseUrl: RELAY_BASE, apiKey: RELAY_KEY }),
+    )
+    const htmlError = await htmlClient.generate('A tiny red pixel', [], signal).catch((caught: unknown) => caught)
+
+    expect((htmlError as Error).message).toBe('OpenAI Codex returned an unprocessable image response (HTTP 502)')
+    expect(`${(htmlError as Error).message}${String((htmlError as Error).cause ?? '')}`).not.toContain(RELAY_KEY)
+
+    const transportFetch = vi.fn(async () => { throw new Error(`transport failed for key ${RELAY_KEY}`) })
+    const transportClient = new OpenAICodex.OpenAICodexImageClient(
+      new OpenAICodex.OpenAICodexCredentialStore(),
+      transportFetch as unknown as typeof globalThis.fetch,
+      () => ({ baseUrl: RELAY_BASE, apiKey: RELAY_KEY }),
+    )
+    const transportError = await transportClient.generate('A tiny red pixel', [], signal)
+      .catch((caught: unknown) => caught)
+
+    expect((transportError as Error).message).toBe('OpenAI Codex image request failed')
+    expect((transportError as Error).cause).toBeUndefined()
+  })
+
+  it('forwards the relay resolver through imagegenTool', async () => {
+    const ctx = new Context()
+    context = ctx
+    await ctx.plugin(LocalFileSystem, { cwd: workspace })
+    await ctx.plugin(LocalAttachmentStore, { dshHome })
+    ctx.provide('llm', { resolveModelInfo: async () => ({ inputModalities: ['image'] }) } as never)
+    const { mock: requestFetch, calls } = relayFetch()
+    const tool = imagegenTool(
+      ctx,
+      new OpenAICodex.OpenAICodexCredentialStore(),
+      new OpenAICodex.ImageToolPolicy(),
+      requestFetch as unknown as typeof globalThis.fetch,
+      () => ({ baseUrl: RELAY_BASE, apiKey: RELAY_KEY }),
+    )
+    const execute = tool.execute as unknown as (
+      args: Record<string, unknown>,
+      exec: unknown,
+    ) => Promise<{ file?: { path: string } }>
+
+    const result = await execute(
+      { prompt: 'A tiny red pixel', output_path: 'relay.png' },
+      { signal, agent: agent([]), deferContext: () => undefined },
+    )
+
+    expect(result.file?.path).toContain('relay.png')
+    expect(await readFile(join(workspace, 'relay.png'))).toEqual(PNG_1X1)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.[0]).toBe(`${RELAY_BASE}/images/generations`)
+    expect(new Headers(calls[0]?.[1].headers).get('authorization')).toBe(`Bearer ${RELAY_KEY}`)
   })
 })

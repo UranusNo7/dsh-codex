@@ -158,6 +158,17 @@ The tool never changes the selected scope, never replays model or business reque
 
 This source no longer creates or modifies the global `AGENTS.md` or `.AGENTS.md` rule files. The retired `writeMemory` field has no effect and cannot enable rule writing; agent-facing proxy instructions come only from the existing `local_network_proxy` tool, whose definition is unchanged. Existing global rule files are left as they are and are not edited or removed automatically. This change is not in the published `v0.3.3-standalone.3` asset, and a running host loads it after the next restart.
 
+## Third-party relay
+
+The plugin can send Codex traffic through a compatible third-party relay instead of OpenAI's direct endpoints. Configure it under **Settings → OpenAI Codex** in the **Relay** card:
+
+- **Relay base URL** is the complete Codex endpoint, for example `https://relay.example.com/backend-api/codex`. A trailing slash is ignored; plain `http://` is accepted only for loopback hosts (`localhost`, `127.0.0.1`, `::1`) for local testing, and URLs carrying credentials, a query, or a fragment are rejected.
+- **Relay API key** is stored with the plugin settings and is never returned to the browser. The settings page reports only whether a key is configured, a saved key is never echoed back, and leaving the key field empty while saving keeps the stored key.
+- An empty URL keeps direct mode. Clearing the URL returns to direct traffic; a saved key alone does not activate the relay.
+- A URL without a key is still relay mode, not direct traffic: relay requests then fail with a fixed configuration error and never fall back to OAuth or the direct endpoints.
+
+Relay traffic sends only the static key, and only to the configured origin. The plugin does not read OAuth credentials for relay requests, does not parse an account id, and does not send `chatgpt-account-id`; OAuth tokens are never sent to the relay. Relay mode has no account usage, so usage reads are refused with a fixed error and the composer quota indicator is hidden; Settings shows the relay mode instead. Relay mode does not fetch the first-party OAuth model catalog: it keeps the plugin's local bundled and cache metadata as candidates only. Which models the relay actually serves is up to the relay; the plugin does not discover relay models or guarantee that every listed model is available there. `web_search` has no standalone relay search and refuses with a fixed unsupported error. `imagegen` uses the selected GPT Image model against `<relay>/images/generations` and `<relay>/images/edits`. Relay traffic uses a dedicated direct dispatcher and is not routed by the bundled managed proxy. The request shape is unchanged: `store: false`, Fast Mode priority, and the native-compaction `compaction_trigger` flow stay as they are. WebSocket context reuse also works through a relay that accepts it: real-relay testing reused one connection across two turns without falling back to SSE. The same values can be seeded as `relayBaseUrl` and `relayApiKey` on the `llm-openai-codex` entry. This capability exists only in the current source and is not part of the published `v0.3.3-standalone.3`; a running host loads it after the next restart, after which the relay can be configured in Web Settings. See [docs/relay.md](docs/relay.md) for details, limits, and the acceptance record.
+
 ## Images
 
 Image support uses dsh's durable attachment path:

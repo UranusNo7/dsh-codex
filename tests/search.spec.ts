@@ -212,6 +212,63 @@ describe('OpenAI Codex standalone search failures', () => {
   })
 })
 
+describe('OpenAI Codex relay search isolation', () => {
+  it('refuses standalone search in relay mode without reading credentials or the network', async () => {
+    const store = await credentialStore()
+    const read = vi.spyOn(store, 'read')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const search = new OpenAICodex.OpenAICodexSearchProvider({
+      credentials: store,
+      model: 'gpt-search-test',
+      mode: 'cached',
+      contextSize: 'medium',
+      maxOutputTokens: 100,
+      resolveRequestId: () => 'relay-request',
+      relay: () => ({ baseUrl: 'https://relay.example.test/v1', apiKey: 'relay-test-key' }),
+    })
+
+    const error = await search.search({ query: 'q' }).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'WEB_PROVIDER_UNSUPPORTED' })
+    expect((error as Error).message).toContain('relay mode does not support standalone search')
+    expect(read).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('treats an invalid relay configuration as relay mode instead of falling back', async () => {
+    const store = await credentialStore()
+    const read = vi.spyOn(store, 'read')
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    const search = new OpenAICodex.OpenAICodexSearchProvider({
+      credentials: store,
+      model: 'gpt-search-test',
+      mode: 'cached',
+      contextSize: 'medium',
+      maxOutputTokens: 100,
+      resolveRequestId: () => 'relay-request',
+      relay: () => { throw new Error('relay base URL is configured but no API key is set') },
+    })
+
+    await expect(search.search({ query: 'q' })).rejects.toThrow(expect.objectContaining({
+      code: 'WEB_PROVIDER_UNSUPPORTED',
+    }))
+    expect(read).not.toHaveBeenCalled()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('keeps the direct search path when the relay resolver returns undefined', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse(searchPayload))
+    vi.stubGlobal('fetch', fetchMock)
+    const search = await provider({ relay: () => undefined })
+
+    await expect(search.search({ query: 'q' })).resolves.toMatchObject({
+      content: 'A synthesized answer.',
+    })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+})
+
 describe('OpenAI Codex composite plugin', () => {
   it('registers search through ctx.web and lets the seam cap structured sources', async () => {
     root = await mkdtemp(join(await realpath(tmpdir()), 'dsh-openai-codex-plugin-'))

@@ -43,6 +43,7 @@ import type {
 import { probeProxyConnectivity } from "./proxy.ts";
 import type { ProxyPreferences } from "./proxy.ts";
 import { isOpenAICodexImageModel } from "./image-model.ts";
+import type { RelaySnapshot, RelayPreferences } from "./relay.ts";
 
 export {
   OPENAI_CODEX_AUTH_CANCEL_PATH,
@@ -76,6 +77,9 @@ export const OPENAI_CODEX_MODEL_FALLBACK_SETTINGS_PATH =
 /** Plugin-owned proxy preference endpoint consumed by its browser half. */
 export const OPENAI_CODEX_PROXY_SETTINGS_PATH =
   "/plugins/dsh-openai-codex/proxy";
+/** Plugin-owned relay endpoint consumed by its browser half. */
+export const OPENAI_CODEX_RELAY_SETTINGS_PATH =
+  "/plugins/dsh-openai-codex/relay";
 
 /** Maximum time a Settings request waits for an authorization challenge. */
 export const OPENAI_CODEX_AUTH_URL_TIMEOUT_MS = 30_000;
@@ -91,6 +95,7 @@ export type OpenAICodexWebAuthStatus =
       message: typeof OPENAI_CODEX_REAUTH_REQUIRED_MESSAGE;
     }
   | { status: "signed-in"; usage: OpenAICodexUsage; quotaError?: string }
+  | { status: "relay"; relay: RelaySnapshot }
   | { status: "error"; message: string };
 
 export type OpenAICodexLoginMethod = "browser" | "device_code";
@@ -843,11 +848,48 @@ function proxyPreferencePatch(
   return patch;
 }
 
+function relayPreferencePatch(
+  value: Record<string, unknown>
+): Partial<RelayPreferences> {
+  const allowed = new Set<keyof RelayPreferences>([
+    "relayBaseUrl",
+    "relayApiKey",
+  ]);
+  if (
+    Object.keys(value).some(
+      (key) => !allowed.has(key as keyof RelayPreferences)
+    )
+  ) {
+    throw new TypeError("request contains an unknown relay setting");
+  }
+  const patch: Partial<RelayPreferences> = {};
+  for (const key of allowed) {
+    if (value[key] === undefined) continue;
+    if (typeof value[key] !== "string") {
+      throw new TypeError(`${key} must be a string`);
+    }
+    patch[key] = value[key];
+  }
+  return patch;
+}
+
+function relayErrorCode(error: unknown): "invalid-base-url" | "invalid-api-key" | "missing-api-key" | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return code === "invalid-base-url" || code === "invalid-api-key" || code === "missing-api-key"
+    ? code
+    : undefined;
+}
+
 interface OpenAICodexWebSettingsController {
   proxyPreferences(): ProxyPreferences;
   updateProxyPreferences(
     patch: Partial<ProxyPreferences>
   ): Promise<ProxyPreferences>;
+  relaySnapshot?(): RelaySnapshot;
+  updateRelayPreferences?(
+    patch: Partial<RelayPreferences>
+  ): Promise<RelaySnapshot>;
   usage?(forceRefresh?: boolean): Promise<OpenAICodexUsage>;
   /** Current candidates with provenance; never performs network work. */
   modelCatalogSettings?(): ModelCatalogSettings;
@@ -911,6 +953,10 @@ export function registerOpenAICodexAuthRoutes(
           if (req.method !== "GET")
             return json(res, 405, { error: "method not allowed" });
           if (!(await authorize(req, res))) return;
+          const relay = proxySettings?.relaySnapshot?.();
+          if (relay?.enabled === true) {
+            return json(res, 200, { status: "relay", relay });
+          }
           json(res, 200, await auth.status());
         },
       }),
@@ -1215,6 +1261,35 @@ export function registerOpenAICodexAuthRoutes(
                   return json(res, 200, { ...saved, connectivity });
                 } catch (error: unknown) {
                   return json(res, 400, { error: safeMessage(error) });
+                }
+              },
+            }),
+          ]),
+      ...(proxySettings?.relaySnapshot === undefined ||
+      proxySettings.updateRelayPreferences === undefined
+        ? []
+        : [
+            ctx.webServer.register({
+              kind: "exact",
+              path: OPENAI_CODEX_RELAY_SETTINGS_PATH,
+              handler: async (req, res) => {
+                if (!(await authorize(req, res))) return;
+                if (req.method === "GET") {
+                  return json(res, 200, proxySettings.relaySnapshot!());
+                }
+                if (req.method !== "POST") {
+                  return json(res, 405, { error: "method not allowed" });
+                }
+                try {
+                  const saved = await proxySettings.updateRelayPreferences!(
+                    relayPreferencePatch(await readSettingsBody(req))
+                  );
+                  return json(res, 200, saved);
+                } catch (error: unknown) {
+                  const code = relayErrorCode(error);
+                  return json(res, 400, {
+                    error: code ?? "invalid relay settings",
+                  });
                 }
               },
             }),

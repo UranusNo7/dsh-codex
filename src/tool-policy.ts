@@ -8,6 +8,14 @@ import {
 import type { ProxyPreferences } from "./proxy.ts";
 import { OPENAI_CODEX_PROVIDER } from "./store.ts";
 import { DEFAULT_OPENAI_CODEX_IMAGE_MODEL } from "./image-model.ts";
+import {
+  normalizeRelayBaseUrl,
+  relaySnapshotOf,
+} from "./relay.ts";
+import type {
+  RelayPreferences,
+  RelaySnapshot,
+} from "./relay.ts";
 import type { OpenAICodexImageModel } from "./image-model.ts";
 
 /** User-controlled image-tool integration. */
@@ -83,7 +91,8 @@ interface OpenAICodexPreferences
     ContextWindowPreferences,
     FastModePreferences,
     ModelFallbackPreferences,
-    ProxyPreferences {}
+    ProxyPreferences,
+    RelayPreferences {}
 
 /** Defaults keep generic vision-model interoperability enabled. */
 export const DEFAULT_IMAGE_TOOL_PREFERENCES: ImageToolPreferences = {
@@ -111,6 +120,12 @@ export const DEFAULT_FAST_MODE_PREFERENCES: FastModePreferences = {
 /** Never change the selected request route until the user opts in. */
 export const DEFAULT_MODEL_FALLBACK_PREFERENCES: ModelFallbackPreferences = {
   automaticModelFallback: false,
+};
+
+/** Default direct traffic: no relay base URL and no relay key. */
+export const DEFAULT_RELAY_PREFERENCES: RelayPreferences = {
+  relayBaseUrl: "",
+  relayApiKey: "",
 };
 
 /** Live policy shared by the host tools, Codex adapter, and settings HTTP surface. */
@@ -142,6 +157,7 @@ export class ImageToolPolicy {
       ...DEFAULT_FAST_MODE_PREFERENCES,
       ...DEFAULT_MODEL_FALLBACK_PREFERENCES,
       ...DEFAULT_PROXY_PREFERENCES,
+      ...DEFAULT_RELAY_PREFERENCES,
       ...base,
       models: [...(
         base.models ?? this.modelCatalog.map((model) => model.id)
@@ -288,6 +304,33 @@ export class ImageToolPolicy {
     return this.proxySnapshot();
   }
 
+  /** Return the browser-safe relay projection; the key is never included. */
+  relaySnapshot(): RelaySnapshot {
+    return relaySnapshotOf(this.current);
+  }
+
+  /** Return the full relay preferences for host transport construction. */
+  relayPreferences(): RelayPreferences {
+    return {
+      relayBaseUrl: this.current.relayBaseUrl,
+      relayApiKey: this.current.relayApiKey,
+    };
+  }
+
+  /** Persist a relay mode/key update after normalizing the base URL. */
+  async updateRelayPreferences(
+    patch: Partial<RelayPreferences>
+  ): Promise<RelaySnapshot> {
+    let normalized: Partial<RelayPreferences> = patch
+    if (patch.relayBaseUrl !== undefined) {
+      // Reject an invalid URL before persisting, but keep the user's trimmed
+      // text; request resolution normalizes it (https, trailing slash).
+      normalizeRelayBaseUrl(patch.relayBaseUrl)
+      normalized = { ...patch, relayBaseUrl: patch.relayBaseUrl.trim() }
+    }
+    await this.commit(normalized);
+    return this.relaySnapshot();
+  }
   /** Return available models and the live discovery subset for the browser. */
   modelCatalogSnapshot(): ModelCatalogSettings {
     return {

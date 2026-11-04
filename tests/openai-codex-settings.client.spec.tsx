@@ -59,6 +59,12 @@ describe("OpenAI Codex settings model catalog", () => {
         const path = String(input);
         if (path.endsWith("/auth/status"))
           return json({ status: authStatus });
+        if (path.endsWith("/relay"))
+          return json({
+            relayBaseUrl: "",
+            relayApiKeySet: false,
+            enabled: false,
+          });
         if (path.endsWith("/auth/login")) {
           authStatus = "signing-in";
           const method = (JSON.parse(String(init?.body)) as { method: string }).method;
@@ -293,6 +299,12 @@ function stubSettingsFetch(
       if (path.endsWith("/models/refresh")) return refresh();
       if (path.endsWith("/models")) return json(catalog);
       if (path.endsWith("/auth/status")) return json({ status: "signed-out" });
+      if (path.endsWith("/relay"))
+        return json({
+          relayBaseUrl: "",
+          relayApiKeySet: false,
+          enabled: false,
+        });
       if (path.endsWith("/image-tools"))
         return json({
           modifyReadImage: true,
@@ -327,6 +339,174 @@ function catalogModelPosts(fetchMock: ReturnType<typeof vi.fn>) {
       String(input).endsWith("/models") && init?.method === "POST"
   );
 }
+
+describe("OpenAI Codex relay settings", () => {
+  function relaySettingsFetch(initial = {
+    relayBaseUrl: "https://relay.example.com/v1",
+    relayApiKeySet: true,
+    enabled: true,
+  }) {
+    let relay = { ...initial };
+    let relayApiKey = initial.relayApiKeySet ? "hidden-test-key" : "";
+    let statusReads = 0;
+    const fetchMock = vi.fn(
+      async (
+        input: string | URL | Request,
+        init?: RequestInit
+      ): Promise<Response> => {
+        const path = String(input);
+        if (path.endsWith("/auth/status")) {
+          statusReads += 1;
+          return json(
+            relay.enabled
+              ? { status: "relay", relay }
+              : { status: "signed-out" }
+          );
+        }
+        if (path.endsWith("/relay")) {
+          if (init?.method === "POST") {
+            const patch = JSON.parse(String(init.body)) as {
+              relayBaseUrl?: string;
+              relayApiKey?: string;
+            };
+            if (patch.relayBaseUrl !== undefined)
+              relay = {
+                ...relay,
+                relayBaseUrl: patch.relayBaseUrl,
+                enabled: patch.relayBaseUrl.length > 0,
+              };
+            if (patch.relayApiKey !== undefined) {
+              relayApiKey = patch.relayApiKey;
+              relay = { ...relay, relayApiKeySet: patch.relayApiKey.length > 0 };
+            }
+            if (patch.relayBaseUrl === "https://bad.example.com") {
+              return new Response(
+                JSON.stringify({ error: "invalid-base-url" }),
+                { status: 400, headers: { "content-type": "application/json" } }
+              );
+            }
+            if (patch.relayBaseUrl === "https://bad-key.example.com") {
+              return new Response(
+                JSON.stringify({ error: "invalid-api-key" }),
+                { status: 400, headers: { "content-type": "application/json" } }
+              );
+            }
+          }
+          return json(relay);
+        }
+        if (path.endsWith("/image-tools"))
+          return json({
+            modifyReadImage: true,
+            shareImagegenWithOtherModels: true,
+            imageGenerationModel: "gpt-image-2",
+          });
+        if (path.endsWith("/response-api"))
+          return json({
+            useWebSocketContextReuse: false,
+            useNativeCompaction: false,
+          });
+        if (path.endsWith("/models"))
+          return json({ availableModels: [], models: [] });
+        if (path.endsWith("/context-window")) return json({ contextWindow: null });
+        if (path.endsWith("/fast-mode-default"))
+          return json({ fastModeDefault: false });
+        if (path.endsWith("/model-fallback"))
+          return json({ automaticModelFallback: false });
+        throw new Error(`unexpected settings request: ${path}`);
+      }
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    return {
+      fetchMock,
+      relay: () => relay,
+      relayApiKey: () => relayApiKey,
+      statusReads: () => statusReads,
+    };
+  }
+
+  it("saves URL/key safely, keeps a blank key, and refreshes relay status immediately", async () => {
+    const state = relaySettingsFetch();
+    render(<OpenAICodexSettings t={t} />);
+
+    expect(await screen.findByText(new RegExp(en.relayKeyConfigured, "u"))).toBeDefined();
+    expect((await screen.findAllByText(en.relayModeRelay)).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: en.loginBrowser })).toBeNull();
+
+    const url = screen.getByLabelText<HTMLInputElement>(en.relayBaseUrl);
+    const key = screen.getByLabelText<HTMLInputElement>(en.relayApiKey);
+    expect(key.type).toBe("password");
+    expect(key.value).toBe("");
+    fireEvent.change(url, { target: { value: "https://relay2.example.com/v1" } });
+    fireEvent.change(key, { target: { value: "relay-test-key" } });
+    fireEvent.click(screen.getByRole("button", { name: en.relaySave }));
+
+    await waitFor(() => {
+      expect(state.relay()).toMatchObject({
+        relayBaseUrl: "https://relay2.example.com/v1",
+        relayApiKeySet: true,
+        enabled: true,
+      });
+    });
+    const posts = () =>
+      state.fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          String(input).endsWith("/relay") && init?.method === "POST"
+      );
+    expect(JSON.parse(String(posts()[0]?.[1]?.body))).toEqual({
+      relayBaseUrl: "https://relay2.example.com/v1",
+      relayApiKey: "relay-test-key",
+    });
+    await waitFor(() => { expect(key.value).toBe(""); });
+    expect(screen.queryByDisplayValue("relay-test-key")).toBeNull();
+    expect(await screen.findByText(en.relayModeActiveHint)).toBeDefined();
+    expect(state.statusReads()).toBeGreaterThan(1);
+
+    fireEvent.click(screen.getByRole("button", { name: en.relaySave }));
+    await waitFor(() => { expect(posts()).toHaveLength(2); });
+    expect(JSON.parse(String(posts()[1]?.[1]?.body))).toEqual({
+      relayBaseUrl: "https://relay2.example.com/v1",
+    });
+    expect(state.relayApiKey()).toBe("relay-test-key");
+  });
+
+  it("clears URL to direct mode, clears the saved key explicitly, and localizes validation failures", async () => {
+    const state = relaySettingsFetch();
+    render(<OpenAICodexSettings t={t} />);
+    await screen.findAllByText(en.relayModeRelay);
+
+    const url = screen.getByLabelText<HTMLInputElement>(en.relayBaseUrl);
+    fireEvent.change(url, { target: { value: "https://bad.example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: en.relaySave }));
+    expect(await screen.findByText(en.relayInvalidBaseUrl)).toBeDefined();
+    expect(screen.queryByText("not-a-url")).toBeNull();
+
+    fireEvent.change(url, { target: { value: "https://bad-key.example.com" } });
+    fireEvent.click(screen.getByRole("button", { name: en.relaySave }));
+    expect(await screen.findByText(en.relayInvalidApiKey)).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: en.relayClearUrl }));
+    await waitFor(() => {
+      expect(state.relay()).toMatchObject({
+        relayBaseUrl: "",
+        enabled: false,
+      });
+    });
+    expect(await screen.findByText(new RegExp(en.relayModeDirect, "u"))).toBeDefined();
+    expect(await screen.findByText(en.signedOut)).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: en.relayClearKey }));
+    await waitFor(() => {
+      expect(state.relay()).toMatchObject({ relayApiKeySet: false });
+    });
+    const posts = state.fetchMock.mock.calls.filter(
+      ([input, init]) =>
+        String(input).endsWith("/relay") && init?.method === "POST"
+    );
+    expect(JSON.parse(String(posts.at(-1)?.[1]?.body))).toEqual({
+      relayApiKey: "",
+    });
+  });
+});
 
 describe("OpenAI Codex settings dynamic catalog refresh", () => {
   it("refreshes the catalog, shows new models, and keeps the saved selection", async () => {
