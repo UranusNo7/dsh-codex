@@ -26,11 +26,11 @@ ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只
 
 ## 一体化版本
 
-`0.3.3-standalone.3` 是自包含的 fork 构建，定位为**基础 dsh profile 中唯一的 Codex 插件**。它以 `v0.3.3-standalone.3` 的 GitHub 预发布资源分发；未发布到 npm。
+`0.3.3-standalone.4` 是自包含的 fork 构建，定位为**基础 dsh profile 中唯一的 Codex 插件**。它以 `v0.3.3-standalone.4` 的 GitHub 预发布资源分发；未发布到 npm。
 
 - **仅 Codex 的冗余提权清理。** GPT 模型在普通写操作中习惯性附带 `sandbox_permissions` 与 `justification` 时，工具调用不再因此失败。只有同时满足以下条件才会移除这两个参数：已能确定当前沙箱模式、且请求目标不严格宽于当前模式（`requested <= current`）、当前请求 provider 严格为 `openai-codex`、工具属于 `bash`／`pwsh`／`write`／`edit`、且该工具的 schema 声明了 dsh 原生提权契约。真正扩大沙箱权限的请求会完整保留参数，继续进入 dsh 自己的审批流程。在 Codex 路径上该能力取代独立的 `dsh-gpt-compat` 插件；它不改变也不替代其他 API provider 的兼容处理。
 - **不做请求头伪装。** 本插件不会全局改写 `User-Agent`／`Originator`，也不会统一冒充 `codex_cli_rs`；各 provider 与协议路径保留自身需要的请求头。独立的 `dsh-custom-header` 插件既不需要，也没有被打包。
-- **运行要求。** 当前源码以 dsh `0.2.2-rc.3`、Cordis `4.1.0`、pi-ai `1.3.0` 与 Node.js `24.9.0` 以上版本为基线，运行与开发依赖使用同一套协调发布的 DSH 版本；旧的 `v0.3.3-standalone.3` 发布资源不包含本次迁移。需要常规 tools 及执行器、sandbox-policy、LLM、web、settings、文件系统与附件服务，以及具备 Codex 资格的 ChatGPT 套餐。安装本身不会发起登录，凭据保存在插件自己的存储中，绝不读取或复制 `~/.codex/auth.json`。
+- **运行要求。** 当前源码以 dsh `0.2.2-rc.3`、Cordis `4.1.0`、pi-ai `1.3.0` 与 Node.js `24.9.0` 以上版本为基线，运行与开发依赖使用同一套协调发布的 DSH 版本。需要常规 tools 及执行器、sandbox-policy、LLM、web、settings、文件系统与附件服务，以及具备 Codex 资格的 ChatGPT 套餐。安装本身不会发起登录，凭据保存在插件自己的存储中，绝不读取或复制 `~/.codex/auth.json`。
 - **不包含。** ChatGPT 网页版专属能力：不自动化网页界面、不读取 ChatGPT 会话或记忆，也不会把订阅转换成通用的 OpenAI API 凭据。
 
 清理行为及其插件生命周期由[一体化验收测试](tests/standalone.spec.ts)覆盖。
@@ -40,13 +40,13 @@ ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只
 把 GitHub Release 中预构建的一体化安装包安装到选定的 dsh profile：
 
 ```sh
-dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz"
 dsh web
 ```
 
-该安装包以 `v0.3.3-standalone.3` 的 GitHub 预发布资源分发，未发布到 npm。请下载 Release 资源，不要安装 GitHub 自动生成的源码压缩包。npm registry 上的 `dsh-codex` 仍是上游版本，不包含这些一体化改动；`dsh plugin --profile web add dsh-codex` 安装的是那个上游 bundle。桌面端应用请改用同一资源并传 `--profile desktop`。
+该安装包以 `v0.3.3-standalone.4` 的 GitHub 预发布资源分发，未发布到 npm。请下载 Release 资源，不要安装 GitHub 自动生成的源码压缩包。npm registry 上的 `dsh-codex` 仍是上游版本，不包含这些一体化改动；`dsh plugin --profile web add dsh-codex` 安装的是那个上游 bundle。桌面端应用请改用同一资源并传 `--profile desktop`。
 
-从 DeepSeek Harness 源码 checkout 运行时，使用 `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"`。开发插件时仍可用 `link:/absolute/path/to/dsh-codex` 安装本地 checkout。
+从 DeepSeek Harness 源码 checkout 运行时，使用 `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz"`。开发插件时仍可用 `link:/absolute/path/to/dsh-codex` 安装本地 checkout。
 
 打开 **设置 → OpenAI Codex**，选择 **浏览器登录** 或 **设备码登录**。浏览器登录会给出授权链接；点击后在系统浏览器完成授权。当浏览器和 dsh 宿主位于同一台机器时，localhost 回调会完成登录；远端浏览器可以使用设备码。账号页面会显示实时 Codex 额度进度条与精确剩余百分比；只有账号接口提供信用余额或工作区限额时，才会一并显示精确数值。
 
@@ -65,7 +65,7 @@ dsh plugin --profile web exec dsh-codex logout
 在 `dsh-tui` 中使用时，把 bundle 安装到同一个 profile：
 
 ```sh
-dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
+dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz"
 ```
 
 重新启动 TUI 后，`/model` 会列出 `openai-codex` 的模型；没有显式模型配置或已保存选择时，TUI 会采用 bundle 注册的 `gpt-5.6-sol`。`/codex status|login|logout|usage|config` 用于管理账号与查看配置；`/codex set backend-fallback on|off` 控制自动模型恢复，其余开关可通过 `/codex set` 查看。`/codex login` 会给出浏览器链接，远端终端可用 `/codex login device` 获取设备码。TUI 的 `/settings` 也通过同一个 dsh 设置命名空间编辑 Codex 的标量设置；模型可见性与代理 URL 仍在 Web 设置页编辑。两个界面共用凭据和实时偏好。
@@ -92,7 +92,7 @@ bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`。它注册 Code
 
 初始勾选来自 Provider 初始化时已可用的目录（随包模型加现有 Codex 缓存）。之后加载的官方列表更新候选，但不自动勾选新发现的模型，需要手动启用。打开 **设置 → OpenAI Codex**，通过复选框选择需要显示的条目；选择实时生效并持久保存，修改后 dsh 会刷新 Web 与 TUI 的模型目录。
 
-该动态目录能力存在于当前源码 checkout。已发布的 `v0.3.3-standalone.3` 资源不包含它，版本号与发布状态均未改变；使用刷新控件需要从该源码重新构建并重启宿主。
+`v0.3.3-standalone.4` 预构建发布资源已包含该动态目录能力。安装 Release 中的插件包后重启 dsh，即可加载更新后的 Host 与客户端入口。
 
 也可以在 `llm-openai-codex` 条目上通过 `models` 设置初始子集，并保持提供方原有顺序：
 
@@ -158,7 +158,7 @@ Web 设置中的网络代理入口现在仅提供内置代理（见 [内置出�
 
 工具不会改变所选 scope、不会自动重放模型或业务请求，也不会返回订阅链接、凭据、原始日志或节点错误原文。探测或测速失败会按失败返回，不自动重试，也不代表连接成功。
 
-当前源码不再创建或修改全局 `AGENTS.md` 或 `.AGENTS.md` 规则文件。旧 `writeMemory` 字段已无效，不能启用规则写入；面向 AI 代理的说明仅由现有 `local_network_proxy` 工具提供，工具定义未改变。已有的全局规则文件保持原样，不会被自动编辑或删除。该改动不在已发布的 `v0.3.3-standalone.3` 资源中，运行中的宿主需在下次重启后加载。
+当前源码不再创建或修改全局 `AGENTS.md` 或 `.AGENTS.md` 规则文件。旧 `writeMemory` 字段已无效，不能启用规则写入；面向 AI 代理的说明仅由现有 `local_network_proxy` 工具提供，工具定义未改变。已有的全局规则文件保持原样，不会被自动编辑或删除。`v0.3.3-standalone.4` 已包含该行为；更新后需重启运行中的宿主。
 
 ## 图片
 

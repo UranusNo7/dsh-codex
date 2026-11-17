@@ -26,11 +26,11 @@ ChatGPT subscription authentication and usage-based OpenAI API access are differ
 
 ## Standalone bundle
 
-Version `0.3.3-standalone.3` is the self-contained fork build, intended to be the only Codex plugin in a base dsh profile. It is distributed as the `v0.3.3-standalone.3` GitHub prerelease asset; it is not published to npm.
+Version `0.3.3-standalone.4` is the self-contained fork build, intended to be the only Codex plugin in a base dsh profile. It is distributed as the `v0.3.3-standalone.4` GitHub prerelease asset; it is not published to npm.
 
 - **Codex-only redundancy cleanup.** A GPT model that habitually sends `sandbox_permissions` and `justification` on ordinary writes no longer fails those calls. The bundle strips those two arguments only when the current sandbox mode is known and the requested mode is not strictly wider than it (`requested <= current`), and only when the routed provider is exactly `openai-codex`, the tool is one of `bash`, `pwsh`, `write`, or `edit`, and that tool's schema declares dsh's native escalation contract. A request that genuinely widens the sandbox keeps both arguments and still enters dsh's own approval flow. On the Codex path this replaces the separate `dsh-gpt-compat` plugin; it does not change or replace compatibility handling for any other API provider.
 - **No header spoofing.** The bundle does not globally rewrite `User-Agent` or `Originator`, and it does not uniformly impersonate `codex_cli_rs`; each provider and protocol path keeps the request headers it requires. The separate `dsh-custom-header` plugin is neither required nor bundled.
-- **Requirements.** Current source targets dsh `0.2.2-rc.3`, Cordis `4.1.0`, pi-ai `1.3.0`, and Node.js `24.9.0` or newer. The runtime and development dependencies use the same coordinated DSH release; this migration is not included in the older `v0.3.3-standalone.3` release asset. It needs the normal tools and an executor, sandbox-policy, LLM, web, settings, filesystem, and attachment services, plus a ChatGPT plan eligible for Codex. Installing performs no login by itself, keeps credentials in its own store, and never reads or copies `~/.codex/auth.json`.
+- **Requirements.** Current source targets dsh `0.2.2-rc.3`, Cordis `4.1.0`, pi-ai `1.3.0`, and Node.js `24.9.0` or newer. The runtime and development dependencies use the same coordinated DSH release. It needs the normal tools and an executor, sandbox-policy, LLM, web, settings, filesystem, and attachment services, plus a ChatGPT plan eligible for Codex. Installing performs no login by itself, keeps credentials in its own store, and never reads or copies `~/.codex/auth.json`.
 - **Not included.** ChatGPT-web-only capabilities: it does not automate the web UI, read ChatGPT conversations or memories, or turn the subscription into a general-purpose OpenAI API credential.
 
 The cleanup and its plugin lifecycle are exercised by [the standalone acceptance test](tests/standalone.spec.ts).
@@ -40,13 +40,13 @@ The cleanup and its plugin lifecycle are exercised by [the standalone acceptance
 Install the prebuilt GitHub release tarball into the selected dsh profile:
 
 ```sh
-dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz"
 dsh web
 ```
 
-The standalone tarball is distributed as the `v0.3.3-standalone.3` GitHub prerelease asset and is not published to npm. Download that release asset, not the GitHub-generated source archive. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; `dsh plugin --profile web add dsh-codex` installs that upstream bundle instead. For the desktop app, use the same asset with `--profile desktop`.
+The standalone tarball is distributed as the `v0.3.3-standalone.4` GitHub prerelease asset and is not published to npm. Download that release asset, not the GitHub-generated source archive. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; `dsh plugin --profile web add dsh-codex` installs that upstream bundle instead. For the desktop app, use the same asset with `--profile desktop`.
 
-From a DeepSeek Harness source checkout, use `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"`. A plugin checkout can still be installed with `link:/absolute/path/to/dsh-codex` for development.
+From a DeepSeek Harness source checkout, use `pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz"`. A plugin checkout can still be installed with `link:/absolute/path/to/dsh-codex` for development.
 
 Open **Settings → OpenAI Codex** and choose **Browser sign-in** or **Device code**. Browser sign-in shows an authorization link; click it to open the system browser, which returns to the dsh host's localhost callback when both run on the same machine. Device code works when the browser is on another machine. The account page shows live Codex quota bars and exact remaining percentages; exact credit balances or workspace limits appear only when the account API supplies them.
 
@@ -65,7 +65,7 @@ dsh plugin --profile web exec dsh-codex logout
 For `dsh-tui`, install the same tarball into that profile:
 
 ```sh
-dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
+dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz"
 ```
 
 After restarting the TUI, `/model` lists the `openai-codex` catalog. With no explicit route or saved selection, the TUI adopts the bundle's `gpt-5.6-sol` default. Use `/codex status|login|logout|usage|config` for the account and live settings; `/codex set backend-fallback on|off` controls automatic model recovery, while the remaining switches are listed by `/codex set`. `/codex login` shows a browser URL, and `/codex login device` shows a device code for remote terminals. The TUI's `/settings` also exposes Codex's scalar controls through the same dsh settings namespace. Model visibility and the proxy URL remain editable in Web Settings. Both front doors share credentials and live preferences.
@@ -92,7 +92,7 @@ Saved model selections are preserved; a refresh replaces the candidate list, kee
 
 The initial checkbox selection is seeded from the catalog available when the provider is initialized (bundled models plus any existing Codex cache). An official list loaded later updates the candidates but does not automatically check newly discovered models, so they stay unchecked until you enable them. Open **Settings → OpenAI Codex** and use the model checkboxes to choose which entries remain visible. The selection is live and durable; dsh refreshes the Web and TUI model directories after it changes.
 
-This dynamic catalog exists in the current source checkout. The published `v0.3.3-standalone.3` release asset does not include it, and the version number and release status are unchanged; using the refresh control requires rebuilding the host from this source and restarting it.
+The `v0.3.3-standalone.4` prebuilt release includes this dynamic catalog. Install the release tarball and restart dsh to load the updated host and client entries.
 
 The same initial subset can be seeded through `models` on the `llm-openai-codex` entry while preserving provider order:
 
@@ -158,7 +158,7 @@ The returned URL is a loopback HTTP proxy on the machine that runs dsh. Use it e
 
 The tool never changes the selected scope, never replays model or business requests, and never returns subscription links, credentials, raw logs, or node error text. A failed probe or test is reported as a failure; it is not retried automatically and does not count as a successful connection.
 
-This source no longer creates or modifies the global `AGENTS.md` or `.AGENTS.md` rule files. The retired `writeMemory` field has no effect and cannot enable rule writing; agent-facing proxy instructions come only from the existing `local_network_proxy` tool, whose definition is unchanged. Existing global rule files are left as they are and are not edited or removed automatically. This change is not in the published `v0.3.3-standalone.3` asset, and a running host loads it after the next restart.
+This source no longer creates or modifies the global `AGENTS.md` or `.AGENTS.md` rule files. The retired `writeMemory` field has no effect and cannot enable rule writing; agent-facing proxy instructions come only from the existing `local_network_proxy` tool, whose definition is unchanged. Existing global rule files are left as they are and are not edited or removed automatically. This behavior is included in `v0.3.3-standalone.4`; restart a running host after updating.
 
 ## Images
 

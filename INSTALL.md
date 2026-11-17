@@ -4,11 +4,11 @@ This is the complete installation procedure for Codex, Claude Code, and other au
 
 ## Objective
 
-Install the public `dsh-codex` bundle into the requested DeepSeek Harness profile, enable its model and search routes, preserve unrelated user configuration, and verify non-secret login state.
+Install the public `dsh-codex` bundle into the requested DeepSeek Harness profile, enable its model route and any explicitly requested Codex search route, preserve unrelated user configuration, and verify non-secret login state.
 
 ## Defaults
 
-- **Package:** for the standalone build, install the GitHub prerelease asset `dsh-codex-0.3.3-standalone.3.tgz` from `https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz`. It is not published to npm. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; use it only when the user explicitly wants the upstream registry bundle.
+- **Package:** for the standalone build, install the GitHub prerelease asset `dsh-codex-0.3.3-standalone.4.tgz` from `https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz`. It is not published to npm. The npm registry package `dsh-codex` remains the upstream release and does not contain the standalone changes; use it only when the user explicitly wants the upstream registry bundle.
 - **Profile:** use the user-named profile; otherwise use `web`.
 - **Launcher:** prefer an installed `dsh`. From a DeepSeek Harness source checkout, run commands in that checkout and replace `dsh` with `pnpm dsh`.
 - **Search mode:** use `live` unless the user requests `cached` or `indexed`.
@@ -34,7 +34,7 @@ Run `dsh --version` or `dsh --help`. From a source checkout, run `pnpm dsh --ver
 For the standalone build, install the published prerelease tarball. It already contains the built `lib/` entries, the bundle patch, and the third-party notices, so no build step is required:
 
 ```sh
-dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz"
 ```
 
 The asset above is the supported standalone distribution; it is not on npm. Do not install the GitHub-generated source archive. Do not additionally install `dsh-custom-header` or `dsh-gpt-compat`: this build already contains the Codex-only redundancy cleanup and intentionally does not rewrite request headers.
@@ -48,7 +48,7 @@ dsh plugin --profile web add dsh-codex
 From a Harness source checkout with the standalone tarball:
 
 ```sh
-pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.3/dsh-codex-0.3.3-standalone.3.tgz"
+pnpm dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz"
 ```
 
 If the user explicitly supplied a local checkout, first require `package.json`, `cordis.patch.yml`, `lib/index.js`, `lib/client.js`, and `lib/bin.js`, and require `package.json.name` to equal `dsh-codex`. Then install its normalized absolute path, using forward slashes on Windows:
@@ -60,6 +60,8 @@ dsh plugin --profile web add link:E:/absolute/path/to/dsh-codex
 Do not run a build when committed `lib/` artifacts are present. The install command is idempotent and must leave `dsh-codex` in the profile dependency map and `dsh.profile.bundles` exactly once.
 
 ### 3. Configure search without replacing user settings
+
+The bundle registers Codex search but does not override the profile's selected web provider. Preserve that selection unless the user explicitly asks to use Codex search. When Codex search is requested, include a `web` row selecting `searchProvider: openai-codex` alongside the plugin's `searchMode` configuration below.
 
 Resolve the profile directory as `$DSH_HOME/profiles/<profile>`; when `DSH_HOME` is unset, use `~/.dsh/profiles/<profile>`.
 
@@ -85,7 +87,7 @@ Require all of these facts:
 
 - `llm-openai-codex` loads `dsh-codex`;
 - `agent-default-model` selects provider `openai-codex` and model `gpt-5.6-sol`, unless a later user setting overrides it;
-- the `web` row selects `searchProvider: openai-codex`;
+- if Codex search was requested, the `web` row selects `searchProvider: openai-codex`; otherwise the existing web provider selection is preserved;
 - `llm-openai-codex.config.searchMode` equals the selected mode.
 
 Stop and report the exact diagnostic if composition fails. Do not start OAuth while the bundle is absent or malformed.
@@ -150,8 +152,10 @@ Do not report OAuth URLs, authorization codes, token timestamps, account ids, or
 
 ## Updating
 
+For the standalone build, install the new versioned GitHub asset rather than switching to the upstream npm package:
+
 ```sh
-dsh plugin --profile web update dsh-codex
+dsh plugin --profile web add "https://github.com/UranusNo7/dsh-codex/releases/download/v0.3.3-standalone.4/dsh-codex-0.3.3-standalone.4.tgz"
 ```
 
 Restart dsh and repeat composition, login-status, and Web verification. A local `link:` installation follows its checkout and is reconciled by repeating the local add command instead.
