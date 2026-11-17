@@ -271,6 +271,7 @@ describe("OpenAI Codex settings model catalog", () => {
 
 interface CatalogPayload {
   availableModels: Array<{ id: string; name: string; contextWindow: number }>;
+  availableImageModels?: Array<{ id: string; name: string }>;
   models: string[];
   discovery?: {
     source: "official" | "cache" | "bundled" | "codex-cache";
@@ -282,7 +283,16 @@ interface CatalogPayload {
 /** Mock every settings endpoint; only the catalog and its refresh vary. */
 function stubSettingsFetch(
   catalog: CatalogPayload,
-  refresh: () => Promise<Response> = async () => json(catalog)
+  refresh: () => Promise<Response> = async () => json(catalog),
+  imageTools: {
+    modifyReadImage: boolean;
+    shareImagegenWithOtherModels: boolean;
+    imageGenerationModel: string;
+  } = {
+    modifyReadImage: true,
+    shareImagegenWithOtherModels: true,
+    imageGenerationModel: "gpt-image-2",
+  }
 ) {
   const fetchMock = vi.fn(
     async (
@@ -294,11 +304,7 @@ function stubSettingsFetch(
       if (path.endsWith("/models")) return json(catalog);
       if (path.endsWith("/auth/status")) return json({ status: "signed-out" });
       if (path.endsWith("/image-tools"))
-        return json({
-          modifyReadImage: true,
-          shareImagegenWithOtherModels: true,
-          imageGenerationModel: "gpt-image-2",
-        });
+        return json({ ...imageTools });
       if (path.endsWith("/response-api"))
         return json({
           useWebSocketContextReuse: false,
@@ -337,6 +343,10 @@ describe("OpenAI Codex settings dynamic catalog refresh", () => {
     };
     const refreshed: CatalogPayload = {
       availableModels: [...catalogModels, terra],
+      availableImageModels: [
+        { id: "gpt-image-2", name: "GPT Image 2" },
+        { id: "gpt-image-2.6-flare", name: "GPT Image 2.6 Flare" },
+      ],
       models: ["gpt-5.6-luna"],
       discovery: { source: "official", updatedAt: Date.UTC(2026, 0, 2, 3, 4) },
     };
@@ -362,6 +372,12 @@ describe("OpenAI Codex settings dynamic catalog refresh", () => {
       name: /GPT-6 Terra/u,
     });
     expect(terraSwitch.getAttribute("aria-checked")).toBe("false");
+    const imageModel = screen.getByRole<HTMLSelectElement>("combobox", {
+      name: en.imageGenerationModel,
+    });
+    expect([...imageModel.options].map(option => option.value)).toEqual(
+      expect.arrayContaining(["gpt-image-2.6-flare"])
+    );
     expect(
       screen.getByRole("switch", { name: /GPT-5\.6 Luna/u })
         .getAttribute("aria-checked")
@@ -384,6 +400,31 @@ describe("OpenAI Codex settings dynamic catalog refresh", () => {
     );
     expect(JSON.parse(String(refreshCall?.[1]?.body))).toEqual({});
     expect(refreshCall?.[1]?.method).toBe("POST");
+  });
+
+  it("keeps a saved image selection that is absent from the first catalog response", async () => {
+    stubSettingsFetch(
+      {
+        availableModels: [...catalogModels],
+        availableImageModels: [{ id: "gpt-image-2.6-flare", name: "GPT Image 2.6 Flare" }],
+        models: ["gpt-5.6-luna"],
+      },
+      undefined,
+      {
+        modifyReadImage: true,
+        shareImagegenWithOtherModels: true,
+        imageGenerationModel: "gpt-image-2.5-flare",
+      }
+    );
+
+    render(<OpenAICodexSettings t={t} />);
+    const imageModel = await screen.findByRole<HTMLSelectElement>("combobox", {
+      name: en.imageGenerationModel,
+    });
+    expect(imageModel.value).toBe("gpt-image-2.5-flare");
+    expect([...imageModel.options].map(option => option.value)).toEqual(
+      expect.arrayContaining(["gpt-image-2.5-flare", "gpt-image-2.6-flare"])
+    );
   });
 
   it("disables the refresh button and model toggles while refreshing", async () => {

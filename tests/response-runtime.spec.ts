@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createAssistantMessageEventStream } from '@earendil-works/pi-ai'
+import { createAssistantMessageEventStream, normalizeContext } from '@earendil-works/pi-ai'
 import type {
   AssistantMessage,
   AssistantMessageEventStream,
@@ -12,12 +12,14 @@ import type { Api } from '@earendil-works/pi-ai'
 import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex'
 import {
   OPENAI_CODEX_CHECKPOINT_FRAME_ALLOWANCE,
+  OPENAI_CODEX_NATIVE_MARKER_CLOSE,
+  OPENAI_CODEX_NATIVE_MARKER_OPEN,
   OpenAICodexResponseRuntime,
   expandNativeCompactionMarkers,
 } from '../src/responses.ts'
 import type { CompactionDecision } from '../src/compaction-types.ts'
 
-function runtimeHarness(initialReuse: boolean) {
+function runtimeHarness(initialReuse: boolean, webSocketBypassesProxy?: () => boolean) {
   let reuse = initialReuse
   const transports: Array<Transport | undefined> = []
   const streamOptions: SimpleStreamOptions[] = []
@@ -30,22 +32,29 @@ function runtimeHarness(initialReuse: boolean) {
       return createAssistantMessageEventStream()
     },
   } satisfies typeof base
-  const runtime = new OpenAICodexResponseRuntime(() => ({
-    useWebSocketContextReuse: reuse,
-    useNativeCompaction: false,
-  }))
+  const runtime = new OpenAICodexResponseRuntime(
+    () => ({
+      useWebSocketContextReuse: reuse,
+      useNativeCompaction: false,
+    }),
+    undefined,
+    undefined,
+    undefined,
+    webSocketBypassesProxy,
+  )
   const wrapped = runtime.wrap(provider)
   const model = base.getModels().find(candidate => candidate.id === 'gpt-5.6-sol')
     ?? base.getModels()[0]
   if (model === undefined) throw new Error('Codex provider has no test model')
   const call = (sessionId: string): void => {
-    wrapped.streamSimple(model, { messages: [] }, { sessionId })
+    wrapped.streamSimple(model, normalizeContext({ messages: [] }), { sessionId })
   }
   return {
     transports,
     streamOptions,
     runtime,
     model,
+    wrapped,
     call,
     setReuse(value: boolean): void { reuse = value },
   }
@@ -98,6 +107,63 @@ describe('OpenAICodexResponseRuntime transport policy', () => {
     harness.call('session-live')
 
     expect(harness.transports).toEqual(['sse', 'websocket-cached', 'sse'])
+  })
+})
+
+describe('OpenAICodexResponseRuntime WebSocket proxy route', () => {
+  it('keeps WebSocket context reuse while the injected fetch shares that route', () => {
+    const harness = runtimeHarness(true, () => false)
+
+    harness.call('session-shared-route')
+
+    expect(harness.transports).toEqual(['websocket-cached'])
+  })
+
+  it('uses SSE when a managed proxy carries only the HTTP fetch', () => {
+    const harness = runtimeHarness(true, () => true)
+
+    harness.call('session-proxied')
+
+    expect(harness.transports).toEqual(['sse'])
+  })
+
+  it('stays on SSE without a proxy guard or with reuse disabled', () => {
+    const unguarded = runtimeHarness(true)
+    unguarded.call('session-unguarded')
+    expect(unguarded.transports).toEqual(['websocket-cached'])
+
+    const disabled = runtimeHarness(false, () => true)
+    disabled.call('session-disabled')
+    expect(disabled.transports).toEqual(['sse'])
+  })
+})
+
+describe('OpenAICodexResponseRuntime payload observation', () => {
+  it('keeps the expanded compaction input when the observer returns undefined', async () => {
+    const harness = runtimeHarness(true)
+    const marker = `${OPENAI_CODEX_NATIVE_MARKER_OPEN}${JSON.stringify([
+      { role: 'user', content: [{ type: 'input_text', text: 'keep this request' }] },
+      { type: 'compaction', id: 'cmp_item_1', encrypted_content: 'opaque' },
+    ])}${OPENAI_CODEX_NATIVE_MARKER_CLOSE}`
+
+    harness.wrapped.streamSimple(harness.model, normalizeContext({ messages: [] }), {
+      sessionId: 'session-observer-undefined',
+      onPayload: async () => undefined,
+    })
+    const options = harness.streamOptions.at(-1)
+    const observed = await options?.onPayload?.({
+      store: false,
+      input: [{ role: 'user', content: [{ type: 'input_text', text: marker }] }],
+    }, harness.model)
+
+    expect(JSON.stringify(observed)).not.toContain('dsh-openai-codex-compaction')
+    expect(observed).toEqual({
+      store: false,
+      input: [
+        { role: 'user', content: [{ type: 'input_text', text: 'keep this request' }] },
+        { type: 'compaction', id: 'cmp_item_1', encrypted_content: 'opaque' },
+      ],
+    })
   })
 })
 
@@ -242,7 +308,7 @@ function gateHarness(options: GateHarnessOptions = {}) {
     decision => decisions.push(decision),
   )
   const wrapped = runtime.wrap(provider)
-  const context = {
+  const context = normalizeContext({
     messages: [
       {
         role: 'user',
@@ -255,7 +321,7 @@ function gateHarness(options: GateHarnessOptions = {}) {
         timestamp: Date.now(),
       },
     ],
-  } as never
+  })
   const compact = async (sessionId: string, sourceText: string | undefined, signal?: AbortSignal): Promise<CompactOutcome> => {
     const leave = runtime.enterCompaction(sessionId, sourceText)
     try {
@@ -548,7 +614,7 @@ describe('OpenAICodexResponseRuntime compaction decisions', () => {
       ...base,
       streamSimple: () => textSummaryStream(model, 'ordinary answer'),
     } satisfies typeof base)
-    for await (const _event of wrapped.streamSimple(model, { messages: [] } as never, { sessionId: 'session-plain' })) {
+    for await (const _event of wrapped.streamSimple(model, normalizeContext({ messages: [] }), { sessionId: 'session-plain' })) {
       // Drain the ordinary stream.
     }
     expect(decisions).toHaveLength(0)

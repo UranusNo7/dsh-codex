@@ -4,13 +4,13 @@ import { createModels } from "@earendil-works/pi-ai";
 import type {
   Api,
   AuthContext,
-  Context as PiContext,
   FetchFunction,
   Model,
   MutableModels,
   Provider,
   SimpleStreamOptions,
   ThinkingLevelMap,
+  TranscriptContext,
 } from "@earendil-works/pi-ai";
 import { openaiCodexProvider } from "./oauth-provider.ts";
 import { resolveRetryPolicy } from "@deepseek-ai/dsh-llm";
@@ -21,6 +21,7 @@ import type {
 } from "@deepseek-ai/dsh-llm";
 import { PiAiAdapter } from "@deepseek-ai/dsh-llm-pi-ai";
 import type { ResolvedPiAiProviderProfile } from "@deepseek-ai/dsh-llm-pi-ai";
+import type { CodexWebSocketTransport } from "./codex-websocket.ts";
 import type {
   AttachmentStore,
   ImageAttachmentRef,
@@ -45,6 +46,7 @@ import type { OpenAICodexOfficialCatalogSource } from "./model-catalog.ts";
 const GPT_6_ASTRA = "gpt-6-astra";
 const GPT_6_SOL = "gpt-6-sol";
 const GPT_6_LUNA = "gpt-6-luna";
+const GPT_6_1_SOL = "gpt-6.1-sol";
 const GPT_6_1_TERRA = "gpt-6.1-terra";
 const GPT_5_6_LUNA = "gpt-5.6-luna";
 /** Backend-authorized Luna Reserve route; deliberately hidden from discovery. */
@@ -55,6 +57,7 @@ const OPENAI_CODEX_MODEL_ORDER = new Map<string, number>(
     GPT_6_ASTRA,
     GPT_6_SOL,
     GPT_6_LUNA,
+    GPT_6_1_SOL,
     GPT_6_1_TERRA,
     "gpt-5.6-sol",
     "gpt-5.6-terra",
@@ -531,7 +534,7 @@ export function withOpenAICodexFastMode(
   const streamSimple = provider.streamSimple;
   return {
     ...provider,
-    streamSimple(model, context: PiContext, options?: SimpleStreamOptions) {
+    streamSimple(model, context: TranscriptContext, options?: SimpleStreamOptions) {
       const enabled =
         provider.id === OPENAI_CODEX_PROVIDER &&
         model.provider === OPENAI_CODEX_PROVIDER &&
@@ -689,7 +692,9 @@ export function createOpenAICodexAdapter(
   fastModeDefault?: () => boolean,
   modelProvider: Provider = createOpenAICodexModelProvider(),
   estimateText?: TokenEstimator,
-  onCompactionDecision?: (decision: CompactionDecision) => void
+  onCompactionDecision?: (decision: CompactionDecision) => void,
+  webSocketBypassesProxy?: () => boolean,
+  webSocketTransport?: CodexWebSocketTransport
 ): PiAiAdapter {
   const provider = requestProvider(
     modelProvider,
@@ -701,7 +706,9 @@ export function createOpenAICodexAdapter(
     responsePreferences,
     requestFetch,
     estimateText,
-    onCompactionDecision
+    onCompactionDecision,
+    webSocketBypassesProxy,
+    () => webSocketTransport !== undefined
   );
   const unset = Symbol("unset context window");
   let resolvedContextWindow: number | null | undefined | typeof unset = unset;
@@ -732,11 +739,19 @@ export function createOpenAICodexAdapter(
       // input guard. Reusing the 1GiB sanity ceiling keeps pathological history
       // bounded without evicting normal image turns at an arbitrary 20MiB.
       maxRequestImageBytes: OPENAI_CODEX_PROMPT_IMAGE_INPUT_GUARD_BYTES,
+      // Codex has no count cap this plugin can prove; keep the byte guard above
+      // as the only request-image bound rather than inventing a 50-image limit.
+      maxRequestImages: Number.MAX_SAFE_INTEGER,
+      imageOffloadCountQuantum: 10,
       requestImageMaxBytes: OPENAI_CODEX_PROMPT_IMAGE_INPUT_GUARD_BYTES,
       retryPolicy: OPENAI_CODEX_RETRY_POLICY,
       configuredMaxTokens: new Map(),
       modelErrors: new Map(),
-      piProvider: responses.wrap(configuredProvider),
+      piProvider: responses.wrap(
+        webSocketTransport === undefined
+          ? configuredProvider
+          : webSocketTransport.wrap(configuredProvider)
+      ),
     };
     resolvedContextWindow = nextContextWindow;
     resolvedModelCatalog = nextModelCatalog;

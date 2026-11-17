@@ -14,8 +14,8 @@ import type {
   ResponseApiPreferences,
 } from "../tool-policy.ts";
 import type { OpenAICodexSettingsKey } from "./locales.ts";
-import { OPENAI_CODEX_IMAGE_MODELS } from "../image-model.ts";
-import type { OpenAICodexImageModel } from "../image-model.ts";
+import { DEFAULT_OPENAI_CODEX_IMAGE_MODEL, OPENAI_CODEX_IMAGE_MODELS } from "../image-model.ts";
+import type { OpenAICodexImageModel, OpenAICodexImageModelEntry } from "../image-model.ts";
 
 const STATUS_PATH = "/plugins/dsh-openai-codex/auth/status";
 const LOGIN_PATH = "/plugins/dsh-openai-codex/auth/login";
@@ -437,6 +437,21 @@ function modelCatalogSourceLabel(
     case "codex-cache":
       return t("modelCatalogSourceCodexCache");
   }
+}
+
+function imageModelChoices(
+  catalog: ModelCatalogSettings | undefined,
+  selected: OpenAICodexImageModel | undefined
+): readonly OpenAICodexImageModelEntry[] {
+  const dynamic = catalog?.availableImageModels;
+  const choices = dynamic !== undefined && dynamic.length > 0
+    ? dynamic
+    : OPENAI_CODEX_IMAGE_MODELS;
+  if (selected === undefined || choices.some((choice) => choice.id === selected)) {
+    return choices;
+  }
+  const known = OPENAI_CODEX_IMAGE_MODELS.find((choice) => choice.id === selected);
+  return [{ id: selected, name: known?.name ?? selected }, ...choices];
 }
 
 /** Format the catalog's last successful fetch in the user's local timezone. */
@@ -994,6 +1009,10 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
   const modelCatalogUpdatedAt = formatModelCatalogUpdatedAt(
     modelCatalog?.discovery?.updatedAt
   );
+  const imageModelOptions = imageModelChoices(
+    modelCatalog,
+    imageTools?.imageGenerationModel
+  );
 
   return (
     <section style={pageStyle} aria-labelledby="openai-codex-settings-title">
@@ -1234,7 +1253,7 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
           <select
             id="openai-codex-image-model"
             aria-label={t("imageGenerationModel")}
-            value={imageTools?.imageGenerationModel ?? "gpt-image-2"}
+            value={imageTools?.imageGenerationModel ?? DEFAULT_OPENAI_CODEX_IMAGE_MODEL}
             disabled={imageTools === undefined || imageToolsBusy}
             style={{ ...numberInputStyle, width: "auto" }}
             onChange={(event) => {
@@ -1243,7 +1262,7 @@ export function OpenAICodexSettings({ t }: OpenAICodexSettingsProps) {
                   .value as OpenAICodexImageModel,
               });
             }}>
-            {OPENAI_CODEX_IMAGE_MODELS.map((model) => (
+            {imageModelOptions.map((model) => (
               <option key={model.id} value={model.id}>
                 {model.name}
               </option>

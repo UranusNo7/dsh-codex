@@ -185,4 +185,36 @@ describe("ImageToolPolicy", () => {
     ).rejects.toThrow("http:// or https://");
     expect(policy.proxySnapshot()).toEqual({ proxyMode: "off", proxyUrl: "" });
   });
+
+  it("merges built-in and official image models and keeps the saved choice", () => {
+    let official = [
+      { id: "gpt-image-2.6-flare" as const, name: "GPT Image 2.6 Flare" },
+    ];
+    const policy = new ImageToolPolicy({}, [], () => official);
+    expect(policy.imageModelCatalogSnapshot().map((entry) => entry.id)).toEqual([
+      "gpt-image-2",
+      "gpt-image-2.5",
+      "gpt-image-2.5-sunburst",
+      "gpt-image-2.5-flare",
+      "gpt-image-2.6-flare",
+    ]);
+
+    official = [];
+    expect(policy.imageModelCatalogSnapshot().map((entry) => entry.id)).toEqual([
+      "gpt-image-2",
+      "gpt-image-2.5",
+      "gpt-image-2.5-sunburst",
+      "gpt-image-2.5-flare",
+    ]);
+
+    const saved = new ImageToolPolicy(
+      { imageGenerationModel: "gpt-image-2.6-sunburst" },
+      [],
+      () => []
+    );
+    expect(saved.imageModelCatalogSnapshot()).toContainEqual({
+      id: "gpt-image-2.6-sunburst",
+      name: "gpt-image-2.6-sunburst",
+    });
+  });
 });

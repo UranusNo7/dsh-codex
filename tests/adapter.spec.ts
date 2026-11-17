@@ -21,6 +21,10 @@ import {
 } from "../src/adapter.ts";
 import { Config } from "../src/index.ts";
 
+/** Minimal store for adapter tests that never resolve a signed-in credential. */
+const emptyCredentialStore = (): OpenAICodexCredentialStore =>
+  ({ read: async () => undefined } as unknown as OpenAICodexCredentialStore);
+
 describe("OpenAI Codex adapter policy", () => {
   it("validates optional catalog and context-window configuration", () => {
     const defaults = Config({});
@@ -38,7 +42,7 @@ describe("OpenAI Codex adapter policy", () => {
 
   it("supplies the complete request-image policy required by current DSH runtimes", () => {
     const adapter = createOpenAICodexAdapter(
-      {} as OpenAICodexCredentialStore,
+      emptyCredentialStore(),
       () => undefined,
       () => ({ useWebSocketContextReuse: false, useNativeCompaction: false })
     );
@@ -111,7 +115,7 @@ describe("OpenAI Codex adapter policy", () => {
     const readImageRequest = vi.fn().mockResolvedValue({});
     const store = { readImageRequest } as unknown as AttachmentStore;
     const adapter = createOpenAICodexAdapter(
-      {} as OpenAICodexCredentialStore,
+      emptyCredentialStore(),
       () => store,
       () => ({ useWebSocketContextReuse: false, useNativeCompaction: false })
     );
@@ -141,7 +145,7 @@ describe("OpenAI Codex adapter policy", () => {
 
   it("registers the extended bounded retry policy on the provider route", () => {
     const adapter = createOpenAICodexAdapter(
-      {} as OpenAICodexCredentialStore,
+      emptyCredentialStore(),
       () => undefined,
       () => ({ useWebSocketContextReuse: false, useNativeCompaction: false })
     );
@@ -166,7 +170,7 @@ describe("OpenAI Codex adapter policy", () => {
 
   it("advertises only configured models while keeping hidden models resolvable", async () => {
     const adapter = createOpenAICodexAdapter(
-      {} as OpenAICodexCredentialStore,
+      emptyCredentialStore(),
       () => undefined,
       () => ({ useWebSocketContextReuse: false, useNativeCompaction: false }),
       undefined,
@@ -189,7 +193,7 @@ describe("OpenAI Codex adapter policy", () => {
 
   it("keeps Luna Reserve hidden while borrowing Luna's image and reasoning capabilities", async () => {
     const adapter = createOpenAICodexAdapter(
-      {} as OpenAICodexCredentialStore,
+      emptyCredentialStore(),
       () => undefined,
       () => ({ useWebSocketContextReuse: false, useNativeCompaction: false })
     );
@@ -221,7 +225,7 @@ describe("OpenAI Codex adapter policy", () => {
   it("rotates snapshot-consistent profiles when the client-side capacity changes", async () => {
     let contextWindow: number | null = null;
     const adapter = createOpenAICodexAdapter(
-      {} as OpenAICodexCredentialStore,
+      emptyCredentialStore(),
       () => undefined,
       () => ({ useWebSocketContextReuse: false, useNativeCompaction: false }),
       undefined,
@@ -291,6 +295,7 @@ describe("OpenAI Codex adapter policy", () => {
       "gpt-6-astra",
       "gpt-6-sol",
       "gpt-6-luna",
+      "gpt-6.1-sol",
       "gpt-6.1-terra",
       "gpt-5.6-sol",
       "gpt-5.6-terra",
@@ -372,7 +377,7 @@ describe("OpenAI Codex adapter policy", () => {
 
   it("advertises the full provider catalog when no model list is configured", async () => {
     const adapter = createOpenAICodexAdapter(
-      {} as OpenAICodexCredentialStore,
+      emptyCredentialStore(),
       () => undefined,
       () => ({ useWebSocketContextReuse: false, useNativeCompaction: false })
     );

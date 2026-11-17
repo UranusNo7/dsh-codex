@@ -6,9 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   OPENAI_CODEX_CATALOG_UNAVAILABLE,
   openAICodexCatalogCachePath,
+  OPENAI_CODEX_IMAGE_CATALOG_URL,
   OpenAICodexOfficialCatalog,
 } from "../src/model-catalog-remote.ts";
 import { OpenAICodexService } from "../src/service.ts";
+import type { OpenAICodexImageModel } from "../src/image-model.ts";
 
 const mocked = vi.hoisted(() => ({
   login: vi.fn(async () => undefined),
@@ -20,6 +22,13 @@ vi.mock("../src/auth.ts", () => ({
   loginOpenAICodex: mocked.login,
   logoutOpenAICodex: mocked.logout,
   openAICodexAuthStatus: mocked.status,
+}));
+
+const netProxy = vi.hoisted(() => ({ codexUrl: undefined as string | undefined }));
+
+vi.mock("../src/net-proxy/index.js", () => ({
+  networkProxyCodexUrl: () => netProxy.codexUrl,
+  networkProxyOwnsGlobal: () => false,
 }));
 
 const catalogModel = {
@@ -60,7 +69,13 @@ interface Harness {
   setAccount: (accountId: string | undefined) => void;
 }
 
-function harness(options: { warm?: boolean; fail?: boolean } = {}): Harness {
+function harness(options: {
+  warm?: boolean;
+  fail?: boolean;
+  imageModel?: OpenAICodexImageModel;
+  proxyMode?: "off" | "scoped" | "global";
+  proxyUrl?: string;
+} = {}): Harness {
   const credentialFile = isolatedCredential();
   let account: string | undefined = "account-a";
   let calls = 0;
@@ -79,7 +94,14 @@ function harness(options: { warm?: boolean; fail?: boolean } = {}): Harness {
             accountId: account,
           } as unknown as Credential);
     },
-    fetch: async () => {
+    fetch: async (url) => {
+      // The public image directory rides the same wave; it is not a catalog call.
+      if (url === OPENAI_CODEX_IMAGE_CATALOG_URL) {
+        return new Response(
+          "- [GPT-Image-2.6 Flare](/api/docs/models/gpt-image-2.6-flare.md): Image generation and editing for fast iteration",
+          { status: 200, headers: { "content-type": "text/markdown" } }
+        );
+      }
       calls += 1;
       return options.fail === true
         ? new Response("", { status: 503 })
@@ -90,6 +112,9 @@ function harness(options: { warm?: boolean; fail?: boolean } = {}): Harness {
     ...preferences,
     credentialFile,
     officialCatalog: catalog,
+    ...(options.imageModel === undefined ? {} : { imageGenerationModel: options.imageModel }),
+    ...(options.proxyMode === undefined ? {} : { proxyMode: options.proxyMode }),
+    ...(options.proxyUrl === undefined ? {} : { proxyUrl: options.proxyUrl }),
     ...(options.warm === true ? { warmModelCatalog: true } : {}),
   });
   return {
@@ -177,8 +202,26 @@ describe("service model catalog wiring", () => {
     await service.dispose();
   });
 
-  it("drops in-flight catalog work when the service is disposed", async () => {
-    let settleFetch!: (response: Response) => void;
+  it("exposes the refreshed public image models without changing the saved choice", async () => {
+    const { service } = harness({ warm: true, imageModel: "gpt-image-2.5-flare" });
+    await settle();
+    const settings = service.modelCatalogSettings();
+    expect(settings.availableImageModels?.map((entry) => entry.id)).toEqual([
+      "gpt-image-2",
+      "gpt-image-2.5",
+      "gpt-image-2.5-sunburst",
+      "gpt-image-2.5-flare",
+      "gpt-image-2.6-flare",
+    ]);
+    expect(
+      settings.availableImageModels?.find((entry) => entry.id === "gpt-image-2.6-flare")
+        ?.name
+    ).toBe("GPT-Image-2.6 Flare");
+    expect(service.imagePreferences().imageGenerationModel).toBe("gpt-image-2.5-flare");
+    await service.dispose();
+  });
+
+  it("drops in-flight catalog work when the service is disposed", async () => {    let settleFetch!: (response: Response) => void;
     const credentialFile = isolatedCredential();
     const catalog = new OpenAICodexOfficialCatalog({
       cacheFile: openAICodexCatalogCachePath(credentialFile),
@@ -203,5 +246,42 @@ describe("service model catalog wiring", () => {
     await settle();
     expect(catalog.snapshot()).toBeUndefined();
     expect(service.modelCatalogSettings().discovery).toEqual({ source: "bundled" });
+  });
+});
+
+describe("service WebSocket proxy route", () => {
+  it("closes provider-local sockets before disposing their proxy pools", async () => {
+    const { service } = harness();
+    const closeSockets = vi.spyOn(service.websocket, "dispose");
+    const closeProxy = vi.spyOn(service.proxy, "dispose");
+    await service.dispose();
+    expect(closeSockets).toHaveBeenCalledOnce();
+    expect(closeProxy).toHaveBeenCalledOnce();
+    expect(closeSockets.mock.invocationCallOrder[0]).toBeLessThan(
+      closeProxy.mock.invocationCallOrder[0]!
+    );
+  });
+
+  it("keeps the WebSocket transport when no proxy is effective", async () => {
+    const { service } = harness();
+    expect(service.websocketTransportBypassesProxy()).toBe(false);
+    await service.dispose();
+  });
+
+  it("reports an effective scoped proxy", async () => {
+    const { service } = harness({ proxyMode: "scoped", proxyUrl: "http://127.0.0.1:7890" });
+    expect(service.websocketTransportBypassesProxy()).toBe(true);
+    await service.dispose();
+  });
+
+  it("reports the managed Codex-only mixed port in off mode", async () => {
+    netProxy.codexUrl = "http://127.0.0.1:7891";
+    try {
+      const { service } = harness();
+      expect(service.websocketTransportBypassesProxy()).toBe(true);
+      await service.dispose();
+    } finally {
+      netProxy.codexUrl = undefined;
+    }
   });
 });

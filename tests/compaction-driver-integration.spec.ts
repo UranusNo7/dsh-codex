@@ -19,6 +19,7 @@ import { SessionQueryEngine } from '@deepseek-ai/dsh-session-query'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import ToolsRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import { ManualCompactionError } from '@deepseek-ai/dsh-compaction'
 import {
   CompactionDiagnostics,
@@ -235,6 +236,7 @@ async function mount() {
   await ctx.plugin(SessionStore)
   await ctx.plugin(TokenMeter)
   await ctx.plugin(ToolsRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(AgentRegistry)
   await ctx.plugin(AgentLoop)

@@ -52,6 +52,12 @@ function fakeService(): OpenAICodexService {
       imagePreferences = { ...imagePreferences, ...patch };
       return { ...imagePreferences };
     }),
+    policy: {
+      imageModelCatalogSnapshot: vi.fn(() => [
+        { id: "gpt-image-2", name: "GPT Image 2" },
+        { id: "gpt-image-2.6-flare", name: "GPT Image 2.6 Flare" },
+      ]),
+    },
     responsePreferences: vi.fn(() => ({ ...responsePreferences })),
     modelFallbackPreferences: vi.fn(() => ({ ...modelFallbackPreferences })),
     updateModelFallbackPreferences: vi.fn(async (patch) => {
@@ -235,6 +241,11 @@ describe("UI-neutral command with optional dsh-tui completion", () => {
     expect(contextField?.parse?.("")).toEqual({ kind: "set", value: null });
     expect(contextField?.parse?.("272000")).toEqual({ kind: "set", value: 272000 });
     expect(contextField?.parse?.("1.5")).toBeUndefined();
+    const imageField = settingsSection?.fields.find(field => field.path[0] === "imageGenerationModel");
+    expect(imageField?.options).toEqual([
+      { value: "gpt-image-2", label: "GPT Image 2" },
+      { value: "gpt-image-2.6-flare", label: "GPT Image 2.6 Flare" },
+    ]);
     await ctx.fiber.dispose();
     context = undefined;
     expect(settingsSection).toBeUndefined();

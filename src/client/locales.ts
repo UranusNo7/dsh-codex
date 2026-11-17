@@ -134,7 +134,7 @@ export const en = {
     "Extend Harness image reading and choose whether other vision models can use image generation.",
   imageGenerationModel: "Image generation model",
   imageGenerationModelHint:
-    "Choose the Codex image backend used for new generations and edits. GPT Image 2 remains the official Codex default; the three GPT Image 2.5 routes are available when you opt in.",
+    "Choose the image model used for new generations and edits. GPT Image 2 remains the default. The list follows the official public image catalog; account availability is determined at runtime.",
   modifyReadImage: "Enhance read_image",
   modifyReadImageHint:
     "Adds HTTP(S) URL input to Harness read_image. Local paths keep using its existing filesystem implementation.",
@@ -147,7 +147,7 @@ export const en = {
     "These switches affect OpenAI Codex requests only. Existing conversations remain readable when either switch is turned off.",
   webSocketContextReuse: "WebSocket context reuse",
   webSocketContextReuseHint:
-    "Keeps store disabled and reuses matching context with previous_response_id on the same Codex WebSocket connection.",
+    "Keeps store disabled and reuses matching context with previous_response_id on the same Codex WebSocket connection. Codex-only WebSocket connections use the same proxy as HTTP; connection failures before response events fall back to SSE through that proxy.",
   nativeCompaction: "Native Responses compaction",
   nativeCompactionHint:
     "Uses Codex V2 compaction through /responses with a compaction_trigger item, then carries the encrypted compaction item into later requests. A native checkpoint is used only when the host token meter's conservative estimate can prove it shrinks below the source text; without that meter or a source budget, or when the result is too large, the same call falls back to the ordinary Harness summary. Falls back to Harness compaction when V2 is unavailable.",
@@ -468,7 +468,7 @@ export const zh: { [Key in OpenAICodexSettingsKey]: string } = {
     "扩展 Harness 的图片读取能力，并选择其他视觉模型能否使用生图。",
   imageGenerationModel: "图片生成模型",
   imageGenerationModelHint:
-    "选择新生成和编辑所使用的 Codex 图片后端。GPT Image 2 仍是官方 Codex 默认值；可按需选择三个 GPT Image 2.5 路由。",
+    "选择新生成和编辑所使用的图片模型。GPT Image 2 仍是默认值；列表跟随官方公开生图目录，账号是否可用以运行时为准。",
   modifyReadImage: "增强 read_image",
   modifyReadImageHint:
     "为 Harness 自带的 read_image 增加 HTTP(S) URL 输入；本地路径继续使用原有文件系统实现。",
@@ -481,7 +481,7 @@ export const zh: { [Key in OpenAICodexSettingsKey]: string } = {
     "这些开关只影响 OpenAI Codex 请求。关闭开关后，已有会话仍可继续使用。",
   webSocketContextReuse: "WebSocket 上下文复用",
   webSocketContextReuseHint:
-    "保持 store 关闭；同一 Codex WebSocket 连接内上下文严格衔接时，通过 previous_response_id 发送增量。",
+    "保持 store 关闭；同一 Codex WebSocket 连接内上下文严格衔接时，通过 previous_response_id 发送增量。仅 Codex WebSocket 使用与 HTTP 相同的代理；响应事件开始前连接失败时，通过同一代理回退 SSE。",
   nativeCompaction: "原生 Responses 压缩",
   nativeCompactionHint:
     "通过 /responses 发送 compaction_trigger 调用 Codex V2 压缩，并把返回的加密 compaction item 带入后续请求。只有 Host token meter 的保守估算能证明原生检查点小于源文本时才会使用；缺少该计量服务或源预算、或结果过大时，同一次调用自动回退普通 Harness 摘要。V2 不可用时回退到 Harness 压缩。",

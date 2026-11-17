@@ -4,6 +4,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import {
   CODEX_CONTEXT_PROVIDER,
   CodexContextController,
@@ -142,7 +143,8 @@ describe('codex_context tool definition', () => {
   it('adds a bounded first-turn prompt cost for one tool (local estimate)', async () => {
     const context = new Context()
     await context.plugin(SystemPrompt)
-    await context.plugin(ToolRuntime, { mode: 'native' })
+    await context.plugin(ToolRuntime)
+    await context.plugin(NativeToolExecutor)
     try {
       const before = JSON.stringify(context.tools.schemas()).length
       context.tools.register(codexContextTool(controller()))
@@ -282,7 +284,8 @@ describe('tool execution signal (probe)', () => {
   it('records whether exec.signal aborts after a normally completed tool', async () => {
     const context = new Context()
     await context.plugin(SystemPrompt)
-    await context.plugin(ToolRuntime, { mode: 'native' })
+    await context.plugin(ToolRuntime)
+    await context.plugin(NativeToolExecutor)
     try {
       let seen: AbortSignal | undefined
       context.tools.register(
@@ -304,12 +307,16 @@ describe('tool execution signal (probe)', () => {
           },
         }),
       )
-      const result = await context.tools.execute({
-        callId: ToolCallId('probe-call'),
-        name: 'codex_context_signal_probe',
-        arguments: {},
+      const batch = await context.tools.execute({
+        calls: [{
+          type: 'tool-call',
+          id: ToolCallId('probe-call'),
+          name: 'codex_context_signal_probe',
+          arguments: JSON.stringify({}),
+        }],
         signal: new AbortController().signal,
       })
+      const result = batch.results[0]!.result
       expect(result.isError).toBe(false)
       expect(seen).toBeDefined()
       // Observed on this Harness: a normally completed tool leaves the signal

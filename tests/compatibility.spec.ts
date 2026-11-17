@@ -15,11 +15,11 @@ const compatiblePackages = {
 
 describe('compatibility contract', () => {
   it('evaluates the declared Node, DSH API, and pi-ai versions as compatible', () => {
-    const report = evaluateCompatibility({ nodeVersion: 'v22.19.0', packageVersions: compatiblePackages })
+    const report = evaluateCompatibility({ nodeVersion: 'v24.9.0', packageVersions: compatiblePackages })
     expect(report).toEqual({
       schemaVersion: 1,
       status: 'compatible',
-      node: { supported: SUPPORTED_NODE_RANGE, installed: 'v22.19.0', status: 'compatible' },
+      node: { supported: SUPPORTED_NODE_RANGE, installed: 'v24.9.0', status: 'compatible' },
       packages: {
         '@deepseek-ai/dsh-llm': { supported: SUPPORTED_DSH_PLUGIN_API_VERSION, installed: SUPPORTED_DSH_PLUGIN_API_VERSION, status: 'compatible' },
         '@deepseek-ai/dsh-llm-pi-ai': { supported: SUPPORTED_DSH_PLUGIN_API_VERSION, installed: SUPPORTED_DSH_PLUGIN_API_VERSION, status: 'compatible' },
@@ -37,6 +37,12 @@ describe('compatibility contract', () => {
     expect(report.packages['@earendil-works/pi-ai']).toMatchObject({ installed: '0.82.2', status: 'incompatible' })
   })
 
+  it.each(['v22.19.0', 'v24.0.0', 'v24.8.9'])('rejects Node versions below the rc.3 baseline: %s', (nodeVersion) => {
+    const report = evaluateCompatibility({ nodeVersion, packageVersions: compatiblePackages })
+    expect(report.node.status).toBe('incompatible')
+    expect(report.status).toBe('incompatible')
+  })
+
   it('keeps missing metadata unknown rather than claiming compatibility', () => {
     const report = evaluateCompatibility({ nodeVersion: 'not-a-node-version', packageVersions: {} })
     expect(report.status).toBe('unknown')
@@ -46,7 +52,7 @@ describe('compatibility contract', () => {
 
   it('supports injected package metadata without reading paths or credentials', async () => {
     const report = await detectCompatibility({
-      nodeVersion: 'v24.0.1',
+      nodeVersion: 'v24.9.1',
       readPackageVersion: async name => compatiblePackages[name],
     })
     expect(report.status).toBe('compatible')

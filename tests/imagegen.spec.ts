@@ -12,10 +12,13 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import SandboxPolicyService from '@deepseek-ai/dsh-sandbox-policy'
 import SessionProjectionRuntime from '@deepseek-ai/dsh-session-projection'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import type { ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutorPlugin from '@deepseek-ai/dsh-tool-executor-native'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import * as OpenAICodex from '../src/index.ts'
 
 const PNG_1X1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC', 'base64')
+const IMAGE_CATALOG_URL = 'https://developers.openai.com/api/docs/models.md'
 const signal = new AbortController().signal
 
 let workspace: string
@@ -62,7 +65,8 @@ async function setup(
   const ctx = new Context()
   context = ctx
   await ctx.plugin(SystemPrompt)
-  await ctx.plugin(ToolRuntime, { mode: 'native' })
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutorPlugin)
   if (sandboxMode === undefined) {
     await ctx.plugin(LocalFileSystem, { cwd: workspace })
   } else {
@@ -104,14 +108,20 @@ async function generate(
   messages: readonly Message[] = [],
   model = 'gpt-5.6-sol',
   provider = OpenAICodex.OPENAI_CODEX_PROVIDER,
-) {
-  return ctx.tools.execute({
+): Promise<ToolExecutionResult> {
+  const batch = await ctx.tools.execute({
     signal,
-    callId: ToolCallId(`imagegen-${++callCounter}`),
-    name: OpenAICodex.IMAGEGEN_TOOL_NAME,
-    arguments: args,
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId(`imagegen-${++callCounter}`),
+      name: OpenAICodex.IMAGEGEN_TOOL_NAME,
+      arguments: JSON.stringify(args),
+    }],
     agent: agent(messages, model, provider) as never,
   })
+  const outcome = batch.results[0]
+  if (outcome === undefined) throw new Error('imagegen tool batch returned no result')
+  return outcome.result
 }
 
 const CATALOG_REQUEST_PREFIX = 'https://chatgpt.com/backend-api/codex/models'
@@ -137,6 +147,13 @@ function successfulFetch(): ProviderFetch {
         headers: { 'content-type': 'application/json' },
       })
     }
+    // The public image directory travels with the same catalog wave.
+    if (url === IMAGE_CATALOG_URL) {
+      return new Response('', {
+        status: 200,
+        headers: { 'content-type': 'text/markdown' },
+      })
+    }
     image.push([url, init ?? {}])
     return new Response(JSON.stringify({
       data: [{ b64_json: PNG_1X1.toString('base64') }],
@@ -159,6 +176,22 @@ describe('imagegen', () => {
     const [, init] = requestFetch.mock.calls[0] as unknown as [string, RequestInit]
     expect(JSON.parse(String(init.body)).model)
       .toBe(OpenAICodex.OPENAI_CODEX_IMAGE_MODEL)
+  })
+
+  it('sends a dynamically supplied image model unchanged in the request body', async () => {
+    const { mock: requestFetch, image } = successfulFetch()
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('global fetch must not run') }))
+    const client = new OpenAICodex.OpenAICodexImageClient(
+      new OpenAICodex.OpenAICodexCredentialStore(),
+      requestFetch as unknown as typeof globalThis.fetch,
+    )
+
+    await expect(
+      client.generate('A tiny red pixel', [], signal, 'gpt-image-2.6-sunburst'),
+    ).resolves.toEqual(PNG_1X1)
+    expect(image).toHaveLength(1)
+    const [, init] = image[0] as [string, RequestInit]
+    expect(JSON.parse(String(init.body)).model).toBe('gpt-image-2.6-sunburst')
   })
 
   it('generates an attachment and optionally publishes the same PNG to the workspace', async () => {

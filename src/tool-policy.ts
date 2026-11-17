@@ -8,7 +8,11 @@ import {
 import type { ProxyPreferences } from "./proxy.ts";
 import { OPENAI_CODEX_PROVIDER } from "./store.ts";
 import { DEFAULT_OPENAI_CODEX_IMAGE_MODEL } from "./image-model.ts";
-import type { OpenAICodexImageModel } from "./image-model.ts";
+import { OPENAI_CODEX_IMAGE_MODELS } from "./image-model.ts";
+import type {
+  OpenAICodexImageModel,
+  OpenAICodexImageModelEntry,
+} from "./image-model.ts";
 
 /** User-controlled image-tool integration. */
 export interface ImageToolPreferences {
@@ -72,6 +76,8 @@ export interface ModelCatalogDiscovery {
 /** Browser projection containing both available and currently visible models. */
 export interface ModelCatalogSettings extends ModelCatalogPreferences {
   availableModels: ModelCatalogEntry[];
+  /** Publicly listed image models merged with the built-in fallback. */
+  availableImageModels?: readonly OpenAICodexImageModelEntry[];
   discovery?: ModelCatalogDiscovery;
 }
 
@@ -120,6 +126,7 @@ export class ImageToolPolicy {
   private readonly imageWatchers = new Set<() => void>();
   private readonly proxyWatchers = new Set<() => void>();
   private readonly resolveModelCatalog: () => readonly ModelCatalogEntry[];
+  private readonly resolveOfficialImageModels: () => readonly OpenAICodexImageModelEntry[];
 
   private get modelCatalog(): readonly ModelCatalogEntry[] {
     return this.resolveModelCatalog();
@@ -127,13 +134,20 @@ export class ImageToolPolicy {
 
   constructor(
     base: Partial<OpenAICodexPreferences> = {},
-    modelCatalog: readonly ModelCatalogEntry[] | (() => readonly ModelCatalogEntry[]) = []
+    modelCatalog: readonly ModelCatalogEntry[] | (() => readonly ModelCatalogEntry[]) = [],
+    officialImageModels: readonly OpenAICodexImageModelEntry[] | (() => readonly OpenAICodexImageModelEntry[]) = []
   ) {
     if (typeof modelCatalog === "function") {
       this.resolveModelCatalog = modelCatalog;
     } else {
       const initialCatalog = modelCatalog.map((model) => ({ ...model }));
       this.resolveModelCatalog = () => initialCatalog;
+    }
+    if (typeof officialImageModels === "function") {
+      this.resolveOfficialImageModels = officialImageModels;
+    } else {
+      const initialImageModels = officialImageModels.map((model) => ({ ...model }));
+      this.resolveOfficialImageModels = () => initialImageModels;
     }
     this.current = {
       ...DEFAULT_IMAGE_TOOL_PREFERENCES,
@@ -181,6 +195,28 @@ export class ImageToolPolicy {
       shareImagegenWithOtherModels: this.current.shareImagegenWithOtherModels,
       imageGenerationModel: this.current.imageGenerationModel,
     };
+  }
+
+  /**
+   * Merge built-in and official public image models, keeping the saved choice
+   * visible even when the current public directory does not list it.
+   */
+  imageModelCatalogSnapshot(): readonly OpenAICodexImageModelEntry[] {
+    const merged = new Map<string, OpenAICodexImageModelEntry>();
+    for (const entry of OPENAI_CODEX_IMAGE_MODELS) {
+      merged.set(entry.id, { ...entry });
+    }
+    for (const entry of this.resolveOfficialImageModels()) {
+      merged.set(entry.id, { id: entry.id, name: entry.name });
+    }
+    const selected = this.current.imageGenerationModel;
+    if (!merged.has(selected)) {
+      merged.set(selected, {
+        id: selected,
+        name: OPENAI_CODEX_IMAGE_MODELS.find((entry) => entry.id === selected)?.name ?? selected,
+      });
+    }
+    return [...merged.values()];
   }
 
   /** Observe live changes that add or remove the scoped `read_image` enhancement. */

@@ -218,3 +218,16 @@ export declare function _installRouting(): Promise<boolean>;
 export declare function _uninstallRouting(): void;
 
 export declare function _normalizeScope(value: string): NetworkProxyScope;
+
+/** Byte-capped tail of the kernel's combined stdout/stderr (test seam). */
+export interface NetworkProxyOutputTail {
+  push(chunk: string | Buffer): void;
+  text(): string;
+}
+
+/** Default cap on the kernel output the host retains, in bytes. */
+export declare const _KERNEL_OUTPUT_LIMIT_BYTES: number;
+
+export declare function _createOutputTail(
+  limitBytes?: number
+): NetworkProxyOutputTail;

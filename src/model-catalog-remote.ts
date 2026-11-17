@@ -9,6 +9,8 @@
  */
 
 import { createHash } from "node:crypto";
+import type { OpenAICodexImageModelEntry } from "./image-model.ts";
+import { isOpenAICodexImageModelId } from "./image-model.ts";
 import { readFileSync } from "node:fs";
 import type { Credential } from "@earendil-works/pi-ai";
 import { writeFileAtomic } from "@deepseek-ai/dsh-atomic-write";
@@ -16,6 +18,18 @@ import { writeFileAtomic } from "@deepseek-ai/dsh-atomic-write";
 /** Fixed official catalog origin. A response can never redirect or retarget it. */
 export const OPENAI_CODEX_CATALOG_URL =
   "https://chatgpt.com/backend-api/codex/models";
+
+/**
+ * Official public model directory. The docs site states that appending `.md`
+ * returns the Markdown form, and this page lists every current image model with
+ * a relative detail link. It needs no account credential and is fetched
+ * alongside the private catalog in the same refresh wave.
+ */
+export const OPENAI_CODEX_IMAGE_CATALOG_URL =
+  "https://developers.openai.com/api/docs/models.md";
+
+/** Hard cap on accepted public image entries. */
+export const OPENAI_CODEX_IMAGE_CATALOG_MAX_MODELS = 50;
 
 /**
  * Whole official client version this parser was verified against.
@@ -65,6 +79,8 @@ export interface OpenAICodexOfficialModel {
 /** Last successfully parsed official catalog for one account. */
 export interface OpenAICodexOfficialSnapshot {
   readonly models: readonly OpenAICodexOfficialModel[];
+  /** Public official image models, when the same wave fetched them. */
+  readonly imageModels?: readonly OpenAICodexImageModelEntry[];
   /** Epoch milliseconds of the successful fetch. */
   readonly fetchedAt: number;
   /** SHA-256 of the ChatGPT account id; the id itself is never stored. */
@@ -180,6 +196,52 @@ function catalogModels(value: unknown): OpenAICodexOfficialModel[] | undefined {
   return models.length === 0 ? undefined : models;
 }
 
+/**
+ * Parse image-model links from the official public directory Markdown.
+ * Only relative `/api/docs/models/gpt-image-*.md` links are accepted, so a
+ * prose mention or an external URL can never enter the selectable catalog.
+ */
+export function parseOfficialImageModels(
+  markdown: string
+): readonly OpenAICodexImageModelEntry[] {
+  const entries: OpenAICodexImageModelEntry[] = [];
+  const seen = new Set<string>();
+  for (const line of markdown.split(/\r?\n/u)) {
+    const match = /^-\s+\[([^\]]+)\]\(\/api\/docs\/models\/(gpt-image-[a-z0-9][a-z0-9.-]*)\.md\)(?::\s*(.+))?$/u.exec(
+      line.trim()
+    );
+    if (match === null) continue;
+    const id = match[2];
+    if (!isOpenAICodexImageModelId(id) || seen.has(id)) continue;
+    seen.add(id);
+    // The link label is the official display name; the trailing description
+    // after `:` is prose and must never become a picker label.
+    const name = (match[1] ?? "").trim().slice(0, 200) || id;
+    entries.push({ id, name });
+    if (entries.length >= OPENAI_CODEX_IMAGE_CATALOG_MAX_MODELS) break;
+  }
+  return entries;
+}
+
+/** Keep only valid persisted image entries, preserving their order. */
+function catalogImageModels(
+  value: unknown
+): readonly OpenAICodexImageModelEntry[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const entries: OpenAICodexImageModelEntry[] = [];
+  const seen = new Set<string>();
+  for (const item of value.slice(0, OPENAI_CODEX_IMAGE_CATALOG_MAX_MODELS)) {
+    const entry = record(item);
+    const id = text(entry?.["id"], 128);
+    if (id === undefined || !isOpenAICodexImageModelId(id) || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    entries.push({ id, name: text(entry?.["name"], 200) ?? id });
+  }
+  return entries.length === 0 ? undefined : entries;
+}
+
 /** Stable account partition key that cannot be reversed into the account id. */
 export function openAICodexAccountHash(accountId: string): string {
   return createHash("sha256").update(accountId).digest("hex");
@@ -227,8 +289,10 @@ function readCache(
   const fetchedAt = document["fetchedAt"];
   const models = catalogModels(document);
   if (!positiveInteger(fetchedAt) || models === undefined) return undefined;
+  const imageModels = catalogImageModels(document["imageModels"]);
   return {
     models,
+    ...(imageModels === undefined ? {} : { imageModels }),
     fetchedAt,
     accountHash: requestedAccountHash,
     source: "cache",
@@ -245,6 +309,9 @@ async function writeCache(
     accountHash: snapshot.accountHash,
     fetchedAt: snapshot.fetchedAt,
     models: snapshot.models,
+    ...(snapshot.imageModels === undefined
+      ? {}
+      : { imageModels: snapshot.imageModels }),
   });
   await writeFileAtomic(filename, `${document}\n`, {
     mode: 0o600,
@@ -481,7 +548,14 @@ export class OpenAICodexOfficialCatalog {
     }
     if (!force && this.retryAt !== undefined && now < this.retryAt) return;
     wave.networked = true;
-    const result = await this.request(view, this.abort.signal);
+    // The public image directory travels with the private text catalog: one
+    // wave, one TTL. A failed public fetch keeps the same account's previous
+    // image list, and the built-in fallback covers the first run.
+    const previousImageModels = this.current?.imageModels;
+    const [result, imageModels] = await Promise.all([
+      this.request(view, this.abort.signal),
+      this.requestImageCatalog(this.abort.signal).catch(() => undefined),
+    ]);
     if (this.disposed || generation !== this.generation) return;
     if (result.models === undefined) {
       this.failure = result.failure;
@@ -490,8 +564,10 @@ export class OpenAICodexOfficialCatalog {
       this.retryAt = this.now() + this.retryMs;
       return;
     }
+    const keptImageModels = imageModels ?? previousImageModels;
     const snapshot: OpenAICodexOfficialSnapshot = {
       models: result.models,
+      ...(keptImageModels === undefined ? {} : { imageModels: keptImageModels }),
       fetchedAt: this.now(),
       accountHash,
       source: "official",
@@ -556,6 +632,43 @@ export class OpenAICodexOfficialCatalog {
         : { models };
     } catch {
       return { failure: OPENAI_CODEX_CATALOG_UNAVAILABLE };
+    }
+  }
+
+  /**
+   * Fetch the public image directory. This request is deliberately anonymous:
+   * it never carries the OAuth token, account id, or any plugin credential,
+   * so a docs-site failure can never leak or challenge the account session.
+   */
+  private async requestImageCatalog(
+    abort: AbortSignal
+  ): Promise<readonly OpenAICodexImageModelEntry[] | undefined> {
+    const timeout = AbortSignal.timeout(this.timeoutMs);
+    const signal =
+      typeof AbortSignal.any === "function"
+        ? AbortSignal.any([abort, timeout])
+        : timeout;
+    try {
+      const response = await this.fetch(OPENAI_CODEX_IMAGE_CATALOG_URL, {
+        method: "GET",
+        redirect: "error",
+        headers: {
+          accept: "text/markdown",
+          "cache-control": "no-store",
+          "user-agent": OPENAI_CODEX_CATALOG_USER_AGENT,
+        },
+        signal,
+      });
+      if (response.status !== 200) {
+        await cancelBody(response);
+        return undefined;
+      }
+      const body = await readBoundedBody(response, this.maxBodyBytes);
+      if (body === undefined) return undefined;
+      const imageModels = parseOfficialImageModels(body);
+      return imageModels.length === 0 ? undefined : imageModels;
+    } catch {
+      return undefined;
     }
   }
 }

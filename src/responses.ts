@@ -2,16 +2,21 @@
 
 import {
   createAssistantMessageEventStream,
+  getCurrentTools,
+  getInitialSystemMessage,
+  getSystemMessageText,
+  normalizeContext,
+  withoutInitialSystemMessage,
 } from '@earendil-works/pi-ai'
 import type {
   AssistantMessage,
   AssistantMessageEventStream,
   Api,
-  Context as PiContext,
   FetchFunction,
   Model,
   Provider,
   SimpleStreamOptions,
+  TranscriptContext,
   Usage,
 } from '@earendil-works/pi-ai'
 import {
@@ -390,7 +395,20 @@ export class OpenAICodexResponseRuntime {
     private readonly preferences: () => ResponseApiPreferences,
     private readonly requestFetch: FetchFunction = globalThis.fetch,
     private readonly estimateText?: TokenEstimator,
-    private readonly onDecision?: (decision: CompactionDecision) => void
+    private readonly onDecision?: (decision: CompactionDecision) => void,
+    /**
+     * Whether pi-ai's WebSocket transport would leave through a different route
+     * than the injected HTTP fetch (a managed proxy the global WebSocket cannot
+     * share). When it does, Codex stays on SSE so both transports use one route.
+     */
+    private readonly webSocketBypassesProxy?: () => boolean,
+    /**
+     * Whether a route-aware WebSocket transport wraps this provider. When it
+     * does, the proxy guard above is unnecessary: the request can keep its
+     * WebSocket selection because that transport itself connects through the
+     * proxy route (and falls back on the same route).
+     */
+    private readonly webSocketTransportAvailable?: () => boolean
   ) {}
 
   /**
@@ -486,7 +504,7 @@ export class OpenAICodexResponseRuntime {
   private streamSimple(
     provider: Provider,
     model: Model<Api>,
-    context: PiContext,
+    context: TranscriptContext,
     options?: SimpleStreamOptions,
   ): AssistantMessageEventStream {
     const key = sessionKey(options?.sessionId)
@@ -512,20 +530,30 @@ export class OpenAICodexResponseRuntime {
   private standardStream(
     provider: Provider,
     model: Model<Api>,
-    context: PiContext,
+    context: TranscriptContext,
     options: SimpleStreamOptions | undefined,
     reuseWebSocketContext: boolean,
   ): AssistantMessageEventStream {
+    // The user preference stays untouched: it only yields a WebSocket transport
+    // when one can share the request route. A route-aware transport keeps the
+    // selection itself; otherwise a proxy managed outside the WebSocket path
+    // forces SSE so the request still uses the HTTP route.
+    const transport = reuseWebSocketContext &&
+      (this.webSocketTransportAvailable?.() === true ||
+        this.webSocketBypassesProxy?.() !== true)
+      ? 'websocket-cached'
+      : 'sse'
     return provider.streamSimple(model, context, {
       ...options,
-      transport: reuseWebSocketContext ? 'websocket-cached' : 'sse',
+      transport,
       onPayload: async (payload, payloadModel) => {
         if (!isRecord(payload)) throw new Error('OpenAI Codex generated a non-object Responses payload')
         const input = Array.isArray(payload['input']) ? expandNativeCompactionMarkers(payload['input']) : payload['input']
         const transformed = { ...payload, input }
-        return options?.onPayload === undefined
-          ? transformed
-          : await options.onPayload(transformed, payloadModel)
+        // An observer that returns undefined keeps pi-ai's original body, so
+        // the expanded compaction items must be the fallback return value.
+        const override = await options?.onPayload?.(transformed, payloadModel)
+        return override ?? transformed
       },
     })
   }
@@ -533,7 +561,7 @@ export class OpenAICodexResponseRuntime {
   private nativeCompactionStream(
     provider: Provider,
     model: Model<Api>,
-    context: PiContext,
+    context: TranscriptContext,
     options: SimpleStreamOptions | undefined,
     compaction: CompactionCall,
   ): AssistantMessageEventStream {
@@ -577,7 +605,7 @@ export class OpenAICodexResponseRuntime {
   private async chooseCompactionStream(
     provider: Provider,
     model: Model<Api>,
-    context: PiContext,
+    context: TranscriptContext,
     options: SimpleStreamOptions | undefined,
     compaction: CompactionCall,
   ): Promise<AssistantMessageEventStream> {
@@ -681,24 +709,35 @@ export class OpenAICodexResponseRuntime {
 
   private async requestNativeCompaction(
     model: Model<Api>,
-    context: PiContext,
+    context: TranscriptContext,
     options?: SimpleStreamOptions,
   ): Promise<CompactResponse> {
     const access = options?.apiKey
     if (access === undefined || access.length === 0) throw new Error('OpenAI Codex compact request has no OAuth token')
-    const messages = context.messages.length === 0 ? [] : context.messages.slice(0, -1)
+    // pi-ai hands providers a normalized transcript: the harness system prompt
+    // and tool declarations live in the leading system message, not in separate
+    // Context fields. Recover the same instructions/tools the ordinary request
+    // carries, and keep that leading message out of `input` so the prompt is
+    // sent once through `instructions` (as `includeSystemPrompt: false` did).
+    const initialSystemMessage = getInitialSystemMessage(context.messages)
+    const instructions = initialSystemMessage === undefined
+      ? ''
+      : getSystemMessageText(initialSystemMessage)
+    const history = withoutInitialSystemMessage(context.messages)
+    const messages = history.length === 0 ? [] : history.slice(0, -1)
     const input = expandNativeCompactionMarkers(convertResponsesMessages(
       model,
-      { ...context, messages },
+      normalizeContext({ messages }),
       CODEX_TOOL_CALL_PROVIDERS,
       { includeSystemPrompt: false },
     ))
     const compat = model.compat as { supportsStrictMode?: boolean; supportsOpenAIGrammarTools?: boolean } | undefined
     const supportsStrictMode = compat?.supportsStrictMode ?? true
     const supportsOpenAIGrammarTools = compat?.supportsOpenAIGrammarTools ?? false
-    const tools = context.tools === undefined || context.tools.length === 0
+    const currentTools = getCurrentTools(context.messages)
+    const tools = currentTools.length === 0
       ? undefined
-      : convertResponsesTools(context.tools, {
+      : convertResponsesTools(currentTools, {
           strict: null,
           supportsStrictMode,
           supportsOpenAIGrammarTools,
@@ -712,7 +751,7 @@ export class OpenAICodexResponseRuntime {
       store: false,
       stream: true,
       input: [...input, { type: 'compaction_trigger' }],
-      instructions: context.systemPrompt ?? '',
+      instructions,
       ...tools === undefined ? {} : { tools },
       tool_choice: 'auto',
       parallel_tool_calls: true,

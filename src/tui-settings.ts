@@ -1,6 +1,7 @@
 /** Display metadata for dsh-tui's optional SettingsSection service. */
 
 import { OPENAI_CODEX_IMAGE_MODELS } from "./image-model.ts";
+import type { OpenAICodexImageModelEntry } from "./image-model.ts";
 
 interface LocalizedText {
   en: string;
@@ -54,8 +55,16 @@ function field(
 
 /** Settings remains owned by the main plugin's volatile Config namespace. */
 export function openAICodexTuiSettingsSection(
-  namespace: string
+  namespace: string,
+  imageModels?: () => readonly OpenAICodexImageModelEntry[]
 ): OpenAICodexTuiSettingsSection {
+  const imageOptions = (): readonly TuiSettingsOption[] => {
+    const dynamic = imageModels?.();
+    const available = dynamic !== undefined && dynamic.length > 0
+      ? dynamic
+      : OPENAI_CODEX_IMAGE_MODELS;
+    return available.map(model => ({ value: model.id, label: model.name }));
+  };
   return {
     ns: namespace,
     title: "OpenAI Codex",
@@ -68,8 +77,12 @@ export function openAICodexTuiSettingsSection(
     fields: [
       field("modifyReadImage", "boolean", "Allow read_image URLs", "增强 read_image URL", "models"),
       field("shareImagegenWithOtherModels", "boolean", "Share imagegen with other models", "允许其他模型使用生图", "models"),
-      field("imageGenerationModel", "select", "Image generation model", "生图模型", "models",
-        OPENAI_CODEX_IMAGE_MODELS.map(model => ({ value: model.id, label: model.name }))),
+      {
+        ...field("imageGenerationModel", "select", "Image generation model", "生图模型", "models"),
+        get options(): readonly TuiSettingsOption[] {
+          return imageOptions();
+        },
+      },
       {
         ...field("contextWindow", "number", "Context window override", "上下文窗口覆盖", "models"),
         hint: "Leave blank to use the provider default (tokens).",

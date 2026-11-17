@@ -355,6 +355,11 @@ describe('OpenAI Codex Web OAuth boundary', () => {
         current = { ...current, ...patch }
         return { ...current }
       }),
+      imageModelCatalogSnapshot: vi.fn(() => [
+        { id: 'gpt-image-2', name: 'GPT Image 2' },
+        { id: 'gpt-image-2.5-flare', name: 'GPT Image 2.5 Flare' },
+        { id: 'gpt-image-2.6-flare', name: 'GPT Image 2.6 Flare' },
+      ]),
     } as unknown as ImageToolPolicy
     const route = captureRoutes(emptyTrustedOrigins, preferences)
       .find(candidate => candidate.path === OPENAI_CODEX_IMAGE_TOOL_SETTINGS_PATH)
@@ -368,12 +373,52 @@ describe('OpenAI Codex Web OAuth boundary', () => {
     expect(updateResponse.observed.status).toBe(200)
     expect(current.imageGenerationModel).toBe('gpt-image-2.5-flare')
 
+    const dynamicResponse = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ imageGenerationModel: 'gpt-image-2.6-flare' }),
+    }), dynamicResponse)
+    expect(dynamicResponse.observed.status).toBe(200)
+    expect(current.imageGenerationModel).toBe('gpt-image-2.6-flare')
+
     const invalidResponse = response()
     await route.handler(request({
       method: 'POST',
       body: JSON.stringify({ imageGenerationModel: 'gpt-image-future' }),
     }), invalidResponse)
     expect(invalidResponse.observed.status).toBe(400)
+  })
+
+  it('falls back to the built-in image list when the controller has no catalog method', async () => {
+    let current: ImageToolPreferences = {
+      modifyReadImage: true,
+      shareImagegenWithOtherModels: true,
+      imageGenerationModel: 'gpt-image-2',
+    }
+    const preferences = {
+      snapshot: vi.fn(() => ({ ...current })),
+      update: vi.fn(async (patch: Partial<typeof current>) => {
+        current = { ...current, ...patch }
+        return { ...current }
+      }),
+    } as unknown as ImageToolPolicy
+    const route = captureRoutes(emptyTrustedOrigins, preferences)
+      .find(candidate => candidate.path === OPENAI_CODEX_IMAGE_TOOL_SETTINGS_PATH)
+    if (route === undefined) throw new Error('image settings route was not registered')
+
+    const allowed = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ imageGenerationModel: 'gpt-image-2.5-flare' }),
+    }), allowed)
+    expect(allowed.observed.status).toBe(200)
+
+    const rejected = response()
+    await route.handler(request({
+      method: 'POST',
+      body: JSON.stringify({ imageGenerationModel: 'gpt-image-2.6-flare' }),
+    }), rejected)
+    expect(rejected.observed.status).toBe(400)
   })
 
   it('serves, updates, resets, and validates the context-window override', async () => {

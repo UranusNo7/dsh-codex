@@ -9,9 +9,11 @@ import {
   OPENAI_CODEX_CATALOG_UNAUTHORIZED,
   OPENAI_CODEX_CATALOG_UNAVAILABLE,
   OPENAI_CODEX_CATALOG_URL,
+  OPENAI_CODEX_IMAGE_CATALOG_URL,
   openAICodexAccountHash,
   openAICodexCatalogCachePath,
   OpenAICodexOfficialCatalog,
+  parseOfficialImageModels,
 } from "../src/model-catalog-remote.ts";
 import type { OpenAICodexOfficialCatalogOptions } from "../src/model-catalog-remote.ts";
 
@@ -56,17 +58,43 @@ function catalogResponse(models: unknown[] = [visible], status = 200): Response 
   });
 }
 
+const IMAGE_MARKDOWN = [
+  "# Models",
+  "",
+  "- [GPT-Image-2](/api/docs/models/gpt-image-2.md): State-of-the-art image generation model",
+  "- [GPT-Image-2.6 Flare](/api/docs/models/gpt-image-2.6-flare.md): Image generation and editing for fast iteration",
+].join("\n");
+
+function imageResponse(status = 200, body = IMAGE_MARKDOWN): Response {
+  return new Response(body, {
+    status,
+    headers: { "content-type": "text/markdown; charset=utf-8" },
+  });
+}
+
 function instance(
-  overrides: Partial<OpenAICodexOfficialCatalogOptions> = {}
-): { catalog: OpenAICodexOfficialCatalog; calls: Call[]; cacheFile: string } {
+  overrides: Partial<OpenAICodexOfficialCatalogOptions> = {},
+  imageFetch?: (url: string, init: RequestInit) => Promise<Response>
+): {
+  catalog: OpenAICodexOfficialCatalog;
+  calls: Call[];
+  imageCalls: Call[];
+  cacheFile: string;
+} {
   const calls: Call[] = [];
+  const imageCalls: Call[] = [];
   const cacheFile = overrides.cacheFile ?? openAICodexCatalogCachePath(tempFile());
+  const privateFetch = overrides.fetch;
   const catalog = new OpenAICodexOfficialCatalog({
     cacheFile,
-    fetch: overrides.fetch ?? (async (url, init) => {
+    fetch: async (url, init) => {
+      if (url === OPENAI_CODEX_IMAGE_CATALOG_URL) {
+        imageCalls.push({ url, init });
+        return imageFetch === undefined ? imageResponse() : imageFetch(url, init);
+      }
       calls.push({ url, init });
-      return catalogResponse();
-    }),
+      return privateFetch === undefined ? catalogResponse() : privateFetch(url, init);
+    },
     readCredential: overrides.readCredential ?? (async () => credential("account-a")),
     ...(overrides.readStoredCredential === undefined
       ? {}
@@ -77,7 +105,7 @@ function instance(
     ...(overrides.timeoutMs === undefined ? {} : { timeoutMs: overrides.timeoutMs }),
     ...(overrides.maxBodyBytes === undefined ? {} : { maxBodyBytes: overrides.maxBodyBytes }),
   });
-  return { catalog, calls, cacheFile };
+  return { catalog, calls, imageCalls, cacheFile };
 }
 
 describe("official model catalog client", () => {
@@ -417,6 +445,98 @@ describe("official model catalog client", () => {
     await catalog.refresh();
     expect(attempts).toBe(2);
     expect(catalog.snapshot()).toBeDefined();
+  });
+});
+
+describe("official public image catalog", () => {
+  it("requests the public docs directory anonymously and parses its gpt-image links", async () => {
+    const { catalog, imageCalls } = instance();
+    await catalog.refresh(true);
+    expect(imageCalls).toHaveLength(1);
+    expect(imageCalls[0]?.url).toBe(OPENAI_CODEX_IMAGE_CATALOG_URL);
+    const headers = imageCalls[0]?.init.headers as Record<string, string>;
+    expect(headers.accept).toBe("text/markdown");
+    expect(headers["user-agent"]).toBe("dsh-openai-codex");
+    expect(headers).not.toHaveProperty("authorization");
+    expect(headers).not.toHaveProperty("chatgpt-account-id");
+    expect(imageCalls[0]?.init.redirect).toBe("error");
+    expect(catalog.snapshot()?.imageModels).toEqual([
+      { id: "gpt-image-2", name: "GPT-Image-2" },
+      { id: "gpt-image-2.6-flare", name: "GPT-Image-2.6 Flare" },
+    ]);
+  });
+
+  it("ignores external or unrelated links and keeps only strict gpt-image entries", () => {
+    expect(parseOfficialImageModels(
+        [
+          "- [GPT-Image-2](/api/docs/models/gpt-image-2.md): ok",
+          "- [External](https://example.com/gpt-image-2.6.md): nope",
+          "- [Other](/api/docs/models/gpt-5.6-sol.md): nope",
+          "- [Bad](/api/docs/models/gpt-image-../x.md): nope",
+          "- [GPT-Image-2](/api/docs/models/gpt-image-2.md): duplicate",
+          "- [GPT-Image-2.6 Sunburst](/api/docs/models/gpt-image-2.6-sunburst.md)",
+        ].join("\n")
+      )
+    ).toEqual([
+      { id: "gpt-image-2", name: "GPT-Image-2" },
+      { id: "gpt-image-2.6-sunburst", name: "GPT-Image-2.6 Sunburst" },
+    ]);
+    // The colon-separated description never becomes the picker name.
+    expect(
+      parseOfficialImageModels(
+        "- [GPT-Image-2.6 Flare](/api/docs/models/gpt-image-2.6-flare.md): Image generation and editing for fast iteration"
+      )
+    ).toEqual([{ id: "gpt-image-2.6-flare", name: "GPT-Image-2.6 Flare" }]);
+  });
+
+  it("persists normalized image metadata and restores it for the same account", async () => {
+    const cacheFile = openAICodexCatalogCachePath(tempFile());
+    const first = instance({ cacheFile });
+    await first.catalog.refresh(true);
+    const persisted = readFileSync(cacheFile, "utf8");
+    expect(persisted).toContain("gpt-image-2.6-flare");
+    expect(persisted).not.toContain("access-token");
+    expect(persisted).not.toContain("# Models");
+
+    const second = instance({ cacheFile });
+    await second.catalog.restore();
+    expect(second.catalog.snapshot()?.imageModels?.map((entry) => entry.id))
+      .toEqual(["gpt-image-2", "gpt-image-2.6-flare"]);
+  });
+
+  it("keeps the previous image list when the public directory fails", async () => {
+    let failImages = false;
+    const { catalog } = instance({}, async () =>
+      failImages ? imageResponse(500) : imageResponse()
+    );
+    await catalog.refresh(true);
+    const previous = catalog.snapshot()?.imageModels;
+    expect(previous).toHaveLength(2);
+    failImages = true;
+    await catalog.refresh(true);
+    expect(catalog.snapshot()?.imageModels).toEqual(previous);
+
+    const offlineFirst = instance({}, async () => {
+      throw new Error("offline");
+    });
+    await offlineFirst.catalog.refresh(true);
+    expect(offlineFirst.catalog.snapshot()?.models).toHaveLength(1);
+    expect(offlineFirst.catalog.snapshot()?.imageModels).toBeUndefined();
+  });
+
+  it("accepts an old cache document without image entries", async () => {
+    const cacheFile = openAICodexCatalogCachePath(tempFile());
+    writeFileSync(cacheFile, JSON.stringify({
+      version: 1,
+      clientVersion: OPENAI_CODEX_CATALOG_CLIENT_VERSION,
+      accountHash: openAICodexAccountHash("account-a"),
+      fetchedAt: 1,
+      models: [visible],
+    }));
+    const { catalog } = instance({ cacheFile });
+    await catalog.restore();
+    expect(catalog.snapshot()?.models).toHaveLength(1);
+    expect(catalog.snapshot()?.imageModels).toBeUndefined();
   });
 });
 

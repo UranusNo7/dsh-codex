@@ -3,9 +3,9 @@ import { dirname, join, parse as parsePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export const COMPATIBILITY_SCHEMA_VERSION = 1 as const
-export const SUPPORTED_NODE_RANGE = '^22.19.0 || >=24.0.0'
-export const SUPPORTED_DSH_PLUGIN_API_VERSION = '0.2.0-rc.1'
-export const SUPPORTED_PI_AI_VERSION = '0.85.1'
+export const SUPPORTED_NODE_RANGE = '>=24.9.0'
+export const SUPPORTED_DSH_PLUGIN_API_VERSION = '0.2.2-rc.3'
+export const SUPPORTED_PI_AI_VERSION = '1.3.0'
 export const PI_AI_PACKAGE = '@earendil-works/pi-ai'
 
 export const DSH_PLUGIN_API_PACKAGES = [
@@ -19,7 +19,6 @@ export const DSH_PLUGIN_API_PACKAGES = [
   '@deepseek-ai/dsh-home-paths',
   '@deepseek-ai/dsh-host-webserver',
   '@deepseek-ai/dsh-http-proxy',
-  '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-llm-pi-ai',
   '@deepseek-ai/dsh-fs',
@@ -109,9 +108,8 @@ function nodeStatus(value: string | null | undefined): CompatibilityStatus {
   if (value === undefined || value === null || value.trim() === '') return 'unknown'
   const parsed = parseNodeVersion(value)
   if (parsed === undefined) return 'unknown'
-  const [major, minor, patch] = parsed
-  if (major === 22) return minor > 19 || (minor === 19 && patch >= 0) ? 'compatible' : 'incompatible'
-  return major >= 24 ? 'compatible' : 'incompatible'
+  const [major, minor] = parsed
+  return major > 24 || (major === 24 && minor >= 9) ? 'compatible' : 'incompatible'
 }
 
 function packageEntry(

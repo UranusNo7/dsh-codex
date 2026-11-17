@@ -4,25 +4,13 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import type { InvariantInstaller } from '@deepseek-ai/dsh-invariants'
 
-const PACKAGE_NAME = 'dsh-codex'
-
-/** Cordis companion plugin name. */
+/** Legacy companion entry retained for existing compositions. */
 export const name = 'openai-codex-invariant'
-/** Service required before the companion can register. */
-export const inject = ['invariants']
+export const inject: readonly string[] = []
 
-// No runtime invariant: the LLM and web registries own provider uniqueness and disposal,
-// while credentials and model replies cross file/network boundaries whose
-// validation runs in their owning operations. There is no separate mutable
-// package relationship to scan.
-const install: InvariantInstaller = () => {}
-
-/**
- * Register this package's invariant companion.
- * @param ctx - Cordis context carrying the invariant service.
- * @returns the installed registration's disposer after setup succeeds.
- */
-export const apply = (ctx: Context): Promise<() => void> =>
-  Promise.resolve(ctx.invariants.register(PACKAGE_NAME, install))
+// Current DSH no longer ships the invariants service. This companion never
+// installed checks: provider uniqueness and disposal belong to the LLM/web
+// registries, and file/network validation remains in its owning operations.
+export const apply = (_ctx: Context): Promise<() => void> =>
+  Promise.resolve(() => {})

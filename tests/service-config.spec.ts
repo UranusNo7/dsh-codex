@@ -54,3 +54,24 @@ describe('credentialFile configuration seam', () => {
     await service.dispose()
   })
 })
+
+describe('image model catalog projection', () => {
+  it('returns built-in image models when no public catalog has been fetched', async () => {
+    isolatedHome()
+    const service = new OpenAICodexService(preferences)
+    try {
+      const settings = service.modelCatalogSettings()
+      expect(settings.availableImageModels?.map((entry) => entry.id)).toEqual([
+        'gpt-image-2',
+        'gpt-image-2.5',
+        'gpt-image-2.5-sunburst',
+        'gpt-image-2.5-flare',
+      ])
+      expect(settings.availableImageModels?.[0]?.name).toBe(
+        'GPT Image 2 (Codex default)'
+      )
+    } finally {
+      await service.dispose()
+    }
+  })
+})

@@ -182,6 +182,9 @@ beforeEach(() => {
   }
   process.env.DSH_HOME = home;
   process.env.APPDATA = join(home, "appdata");
+  // Most cases exercise manual operations with an explicitly disabled proxy.
+  mkdirSync(join(home, ".dsh-net-proxy"), { recursive: true });
+  writeFileSync(join(home, ".dsh-net-proxy", "config.json"), JSON.stringify({ enabled: false }));
   resetState();
   for (const [key, value] of Object.entries(originalRuntime)) {
     netProxy._runtime[key] = value;
@@ -259,7 +262,51 @@ describe("network proxy host API contract", () => {
     }
   });
 
-  it("does not start a kernel or touch host routing when mounted", () => {
+  it.each([
+    { label: "default settings", saved: {}, enabled: true },
+    { label: "saved on", saved: { enabled: true }, enabled: true },
+    { label: "saved off", saved: { enabled: false }, enabled: false },
+  ])("restores $label without taking over host networking", async ({ saved, enabled }) => {
+    writeFileSync(join(home, ".dsh-net-proxy", "config.json"), JSON.stringify(saved));
+    const dispatcher = getGlobalDispatcher();
+    netProxy._state.nodes = [{
+      name: "node-a", type: "Trojan", status: "ok", delay: 100,
+      failCount: 0, cooldownMs: 0,
+    } as typeof netProxy._state.nodes[number]];
+    netProxy._runtime.api = vi.fn(async () => { throw new Error("stopped"); });
+    const startKernel = vi.fn(async () => {
+      netProxy._state.kernel = { status: "running" } as typeof netProxy._state.kernel;
+      return netProxy._state.kernel;
+    });
+    const testAllNodes = vi.fn(async () => ({ alive: 1, total: 1 }));
+    netProxy._runtime.startKernel = startKernel;
+    netProxy._runtime.stopKernel = vi.fn(async () => undefined);
+    netProxy._runtime.testAllNodes = testAllNodes;
+    const { ctx, dispose } = fakeContext();
+    try {
+      netProxy.apply(ctx);
+      expect(netProxy._state.config.enabled).toBe(enabled);
+      expect(netProxy.getNetworkProxyScope()).toBe("codex");
+      await vi.waitFor(() => expect(netProxy._state.busy).toBeUndefined());
+      expect(startKernel).toHaveBeenCalledTimes(enabled ? 1 : 0);
+      expect(testAllNodes).toHaveBeenCalledTimes(enabled ? 1 : 0);
+      expect(netProxy._state.routing.installed).toBe(enabled);
+      if (enabled) {
+        expect(netProxy._state.routing.via).toBe("codex-transport");
+        expect(netProxy.networkProxyCodexUrl()).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+      }
+      expect(getGlobalDispatcher()).toBe(dispatcher);
+      expect(process.env.HTTP_PROXY).toBeUndefined();
+      expect(process.env.HTTPS_PROXY).toBeUndefined();
+      const persisted = JSON.parse(readFileSync(join(home, ".dsh-net-proxy", "config.json"), "utf8"));
+      expect(persisted.enabled).toBe(enabled);
+      expect(persisted.scope).toBe("codex");
+    } finally {
+      dispose();
+    }
+  });
+
+  it("does not start a kernel or touch host routing when saved off", () => {
     const dispatcher = getGlobalDispatcher();
     const { ctx, dispose } = fakeContext();
     try {
@@ -863,5 +910,57 @@ describe("bundled asset location", () => {
     expect(netProxy._paths.binDir()).toBe(join(root, "bin", "net-proxy"));
     expect(netProxy._resolvePackageRoot(join(root, "src", "net-proxy"))).toBe(root);
     expect(netProxy._resolvePackageRoot(join(root, "lib"))).toBe(root);
+  });
+});
+
+describe("bounded kernel output", () => {
+  it("keeps only the tail when the kernel keeps talking", () => {
+    const output = netProxy._createOutputTail(1024);
+    for (let index = 0; index < 500; index += 1) {
+      output.push(Buffer.from(`chunk-${String(index).padStart(4, "0")}\n`, "utf8"));
+    }
+    const tail = output.text();
+    expect(Buffer.byteLength(tail, "utf8")).toBeLessThanOrEqual(1024);
+    expect(tail).toContain("chunk-0499");
+    expect(tail).not.toContain("chunk-0000");
+  });
+
+  it("truncates one oversized chunk to its last bytes", () => {
+    const output = netProxy._createOutputTail(1024);
+    output.push(Buffer.from(`${"x".repeat(4096)}\n内核退出\n`, "utf8"));
+    const tail = output.text();
+    expect(Buffer.byteLength(tail, "utf8")).toBe(1024);
+    expect(tail.endsWith("\n内核退出\n")).toBe(true);
+  });
+
+  it("retains the Chinese UTF-8 tail of a large stream", () => {
+    const output = netProxy._createOutputTail(256);
+    output.push(Buffer.from(`${"普通日志行\n".repeat(200)}最后一行：内核已退出\n`, "utf8"));
+    const tail = output.text();
+    expect(Buffer.byteLength(tail, "utf8")).toBeLessThanOrEqual(256);
+    expect(tail.endsWith("最后一行：内核已退出\n")).toBe(true);
+    expect(tail).toContain("内核");
+  });
+
+  it("shares the cap between stdout and stderr", () => {
+    const output = netProxy._createOutputTail(2048);
+    for (let index = 0; index < 300; index += 1) {
+      output.push(Buffer.from(`stdout-${index}\n`, "utf8"));
+      output.push(`stderr-${index}\n`);
+    }
+    const tail = output.text();
+    expect(Buffer.byteLength(tail, "utf8")).toBeLessThanOrEqual(2048);
+    expect(tail.endsWith("stderr-299\n")).toBe(true);
+    expect(tail).toContain("stdout-299");
+    expect(tail).not.toContain("stdout-1\n");
+  });
+
+  it("caps the default retention at 256 KiB", () => {
+    expect(netProxy._KERNEL_OUTPUT_LIMIT_BYTES).toBe(256 * 1024);
+    const output = netProxy._createOutputTail();
+    output.push(Buffer.alloc(netProxy._KERNEL_OUTPUT_LIMIT_BYTES + 1024, 0x61));
+    expect(Buffer.byteLength(output.text(), "utf8")).toBe(
+      netProxy._KERNEL_OUTPUT_LIMIT_BYTES
+    );
   });
 });

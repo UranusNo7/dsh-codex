@@ -2,6 +2,7 @@
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ToolCallBlock, ToolResultNode } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import { PartialArguments } from '@deepseek-ai/dsh-util-values'
 import type { CompactionDiagnosticsSnapshot } from '../src/compaction-types.ts'
 import { CompactionTurnNotice, compactionRequestIds, type CompactionTurnNoticeProps } from '../src/client/CompactionTurnNotice.tsx'
 import { zh } from '../src/client/locales.ts'
@@ -14,6 +15,7 @@ const t = (key: string) => (zh as Record<string, string>)[key] ?? key
 function result(id: string, overrides: Partial<ToolResultNode> = {}): ToolResultNode {
   return {
     kind: 'tool-result', seq: 12, time: 100, callId: `call-${id}`, callTime: 90,
+    name: 'codex_context', args: PartialArguments.fromObject({ action: 'request_compaction' }),
     call: { name: 'codex_context', argsRaw: '{"action":"request_compaction"}' },
     content: [{ type: 'text', text: JSON.stringify({ action: 'request_compaction', ok: true, queued: { requestId: id } }) }],
     isError: false, subCalls: [], ...overrides,

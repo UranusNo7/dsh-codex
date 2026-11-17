@@ -1,9 +1,11 @@
 import { Context } from '@deepseek-ai/cordis'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
-import type { ContentBlock, ToolCallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   installOpenAICodexToolCompat,
@@ -70,6 +72,7 @@ async function harness(
   context = ctx
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
 
   const approvalRequest = vi.fn(async () => 'rejected')
   const sandboxResolve = vi.fn(() => ({ mode: 'read-only', workspaceRoot: '/tmp' }))
@@ -118,13 +121,17 @@ async function harness(
       if (input.currentMode !== undefined) {
         sandboxResolve.mockReturnValue({ mode: input.currentMode, workspaceRoot: '/tmp' })
       }
-      const result = await ctx.tools.execute({
-        callId: `call-${calls}` as ToolCallId,
-        name: input.name ?? 'bash',
-        arguments: input.arguments,
+      const batch = await ctx.tools.execute({
+        calls: [{
+          type: 'tool-call',
+          id: ToolCallId(`call-${calls}`),
+          name: input.name ?? 'bash',
+          arguments: JSON.stringify(input.arguments),
+        }],
         ...(input.agent === undefined ? {} : { agent: input.agent }),
         signal: new AbortController().signal,
       })
+      const result = batch.results[0]!.result
       return {
         isError: result.isError,
         ...(observed.arguments === undefined ? {} : { observed: observed.arguments }),

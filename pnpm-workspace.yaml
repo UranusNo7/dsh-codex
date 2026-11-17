@@ -13,4 +13,4 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/*'
 
 overrides:
-  '@earendil-works/pi-ai': 0.85.1
+  '@earendil-works/pi-ai': 1.3.0

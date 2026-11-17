@@ -43,6 +43,7 @@ import type {
 import { probeProxyConnectivity } from "./proxy.ts";
 import type { ProxyPreferences } from "./proxy.ts";
 import { isOpenAICodexImageModel } from "./image-model.ts";
+import type { OpenAICodexImageModelEntry } from "./image-model.ts";
 
 export {
   OPENAI_CODEX_AUTH_CANCEL_PATH,
@@ -666,7 +667,8 @@ async function readSettingsBody(
 }
 
 function imagePreferencePatch(
-  value: Record<string, unknown>
+  value: Record<string, unknown>,
+  availableImageModels?: readonly OpenAICodexImageModelEntry[]
 ): Partial<ImageToolPreferences> {
   const allowed = new Set<keyof ImageToolPreferences>([
     "modifyReadImage",
@@ -692,7 +694,10 @@ function imagePreferencePatch(
   }
 
   if (value["imageGenerationModel"] !== undefined) {
-    if (!isOpenAICodexImageModel(value["imageGenerationModel"])) {
+    if (!isOpenAICodexImageModel(
+      value["imageGenerationModel"],
+      availableImageModels
+    )) {
       throw new TypeError("imageGenerationModel is not a supported image model");
     }
     patch.imageGenerationModel = value["imageGenerationModel"];
@@ -1032,7 +1037,10 @@ export function registerOpenAICodexAuthRoutes(
                     res,
                     200,
                     await imageTools.update(
-                      imagePreferencePatch(await readSettingsBody(req))
+                      imagePreferencePatch(
+                        await readSettingsBody(req),
+                        imageTools.imageModelCatalogSnapshot?.()
+                      )
                     )
                   );
                 } catch (error: unknown) {

@@ -30,7 +30,7 @@ ChatGPT 订阅认证与按量计费的 OpenAI API 是不同产品。本插件只
 
 - **仅 Codex 的冗余提权清理。** GPT 模型在普通写操作中习惯性附带 `sandbox_permissions` 与 `justification` 时，工具调用不再因此失败。只有同时满足以下条件才会移除这两个参数：已能确定当前沙箱模式、且请求目标不严格宽于当前模式（`requested <= current`）、当前请求 provider 严格为 `openai-codex`、工具属于 `bash`／`pwsh`／`write`／`edit`、且该工具的 schema 声明了 dsh 原生提权契约。真正扩大沙箱权限的请求会完整保留参数，继续进入 dsh 自己的审批流程。在 Codex 路径上该能力取代独立的 `dsh-gpt-compat` 插件；它不改变也不替代其他 API provider 的兼容处理。
 - **不做请求头伪装。** 本插件不会全局改写 `User-Agent`／`Originator`，也不会统一冒充 `codex_cli_rs`；各 provider 与协议路径保留自身需要的请求头。独立的 `dsh-custom-header` 插件既不需要，也没有被打包。
-- **运行要求。** 开发基线是本 checkout 的 dsh `0.2.0-rc.1` 插件表层；目标是桌面端 `0.2.1-rc.2`，其安装包已在只使用精确 `0.2.1-rc.2` 核心包与 Cordis `4.0.5` 的隔离消费者中通过烟测。其他 dsh 版本不作承诺；安装到 `0.2.1-rc.2` 时会出现预期内的 peer 版本范围警告。需要常规 tools、sandbox-policy、LLM、web、settings、文件系统与附件服务，以及具备 Codex 资格的 ChatGPT 套餐。安装本身不会发起登录，凭据保存在插件自己的存储中，绝不读取或复制 `~/.codex/auth.json`。
+- **运行要求。** 当前源码以 dsh `0.2.2-rc.3`、Cordis `4.1.0`、pi-ai `1.3.0` 与 Node.js `24.9.0` 以上版本为基线，运行与开发依赖使用同一套协调发布的 DSH 版本；旧的 `v0.3.3-standalone.3` 发布资源不包含本次迁移。需要常规 tools 及执行器、sandbox-policy、LLM、web、settings、文件系统与附件服务，以及具备 Codex 资格的 ChatGPT 套餐。安装本身不会发起登录，凭据保存在插件自己的存储中，绝不读取或复制 `~/.codex/auth.json`。
 - **不包含。** ChatGPT 网页版专属能力：不自动化网页界面、不读取 ChatGPT 会话或记忆，也不会把订阅转换成通用的 OpenAI API 凭据。
 
 清理行为及其插件生命周期由[一体化验收测试](tests/standalone.spec.ts)覆盖。
@@ -72,7 +72,7 @@ dsh plugin --profile dsh-tui add "https://github.com/UranusNo7/dsh-codex/release
 
 Codex、Claude Code 及其他自动化 agent 应直接遵循 [INSTALL.md](INSTALL.md)。它是一份完整且可重复执行的 runbook，不要求安装者阅读源码或设计文档。
 
-bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`，并选择 Codex 搜索提供方。dsh settings 中已经保存的模型仍然优先；模型选择器可以切换到当前账号可用的其他 Codex 模型。GPT-6.1 Terra 是可选的内置模型，不改变 `gpt-5.6-sol` 默认值。
+bundle 会为新建 agent 选择 `openai-codex` / `gpt-5.6-sol`。它注册 Codex 搜索提供方，但不覆盖 profile 的网页 provider 选择；使用 Codex 搜索时需显式设置 `web.searchProvider: openai-codex`。dsh settings 中已经保存的模型仍然优先；模型选择器可以切换到当前账号可用的其他 Codex 模型。GPT-6.1 Terra 是可选的内置模型，不改变 `gpt-5.6-sol` 默认值。
 
 自动模型回退默认关闭。启用 **设置 → OpenAI Codex** 中的开关后，插件只会遵循 OpenAI 为当前账号返回的恢复指令：普通恢复按后端给出的替代模型顺序选择；`luna_reserve` 指令则解析官方隐藏的 `gpt-reserve` 路由，并沿用 Luna 的上下文、推理与图片能力。该决定发生在 dsh 准备重试之前，因此实际模型、上下文预算、图片准入与 Session 请求头保持一致。视觉路由绝不会回退到纯文本模型，附件、`read_image` 与 `imagegen` 会继续可用。没有兼容回退或额度刷新失败时，原始额度错误会继续交给 Harness 的正常重试路径。`imagegen` 与该切换相互独立，并使用设置页中选定的图片后端。
 
@@ -127,7 +127,7 @@ Web 设置中的网络代理入口现在仅提供内置代理（见 [内置出�
 旧的三态 HTTP(S) 代理设置仍通过既有插件 API、CLI 与 TUI 配置兼容，本次构建不会移除它们；已保存的值会保留，不会被自动清空或迁移：
 
 - **跟随 dsh** 不由插件覆盖网络设置；Codex 继承 dsh 启动时已经配置的进程级代理。
-- **仅 Codex** 把所选代理用于 Codex 模型 SSE 请求、原生压缩、独立搜索、生图、额度读取，以及从设置页或 TUI 发起的 OAuth 登录和刷新；WebSocket 与独立 CLI 登录仍遵循进程策略。
+- **仅 Codex** 把所选代理用于 Codex 模型 SSE 和 WebSocket 请求、原生压缩、独立搜索、生图、额度读取，以及从设置页或 TUI 发起的 OAuth 登录和刷新。勾选 WebSocket 复用时，Codex 专用传输适配会使用与 HTTP 相同的代理建连，不替换全局 WebSocket。代理线路变更会使用独立连接；响应事件开始前连接失败时，通过同一代理回退 SSE。未使用该局部代理时，WebSocket 遵循进程策略；独立 CLI 登录也遵循进程策略。
 - **整个 dsh** 把代理应用到整个进程，并覆盖 OAuth；其他插件的请求也会受影响。关闭后会恢复插件覆盖前的宿主策略。
 
 代理 URL 支持 `http://` 与 `https://`。留空时依次使用 `DSH_CODEX_PROXY`，以及标准的 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 与 `NO_PROXY` 环境变量。默认模式是 **跟随 dsh**，因此安装插件不会静默改变整个进程的 dispatcher。
@@ -138,8 +138,10 @@ Web 设置中的网络代理入口现在仅提供内置代理（见 [内置出�
 
 本 bundle 同时打包了 `dsh-net-proxy` 的节点管理能力：mihomo 内核与 geodata 位于 `bin/net-proxy/`，无需再安装其他代理客户端。插件设置页可导入 Clash 格式订阅、测量节点延迟、固定节点或自动选择最快节点，并启用或停用代理。
 
+- **启动。** 默认开启，加载插件时在后台自动启动，优先使用已缓存的订阅。手动保存的关闭设置仍会保留；启动失败会在设置页显示。
 - **范围。** 默认 **仅 Codex**，只代理 Codex 流量；可切换为 **整个 dsh**，让所有宿主流量走所选节点。
 - **平台。** 内置内核仅支持 Windows x64；插件自身代码与平台无关。
+- **内核诊断。** stdout/stderr 合并后仅保留最近 256 KiB，不再把内核整个运行期间的输出持续积累在宿主内存中。
 - **不要同时启用。** 不要与独立的 `dsh-net-proxy` 插件同时启用：两者会各自启动一个内核，并争用同一份本地状态与端口。
 - 内置内核与 geodata 各自保留原有许可；第三方声明与实际随包字节的 SHA-256 见 [docs/third-party-notices.md](docs/third-party-notices.md)。
 
@@ -170,7 +172,9 @@ Web 设置中的网络代理入口现在仅提供内置代理（见 [内置出�
 
 任何支持视觉输入的当前对话模型都可以使用 `imagegen`。当前模型只需编写普通提示词，并在 `referenced_image_paths` 与 `num_last_images_to_include` 中选择一种参考图来源；插件从 `ctx.fs` 或附件存储读取字节，再发送给配置的 GPT Image 后端。模型不会输出 base64。每个结果都会直接显示在对话中、保存为持久附件，并写入当前工作区。`output_path` 用来指定位置；省略时会创建唯一的 `generated-<时间戳>-<id>.png` 文件。本地保存能力包含在本插件中；当工作区由 `dsh-remote-ssh` 管理时，远程插件负责 AHP 写入路径。
 
-设置页可选择 `gpt-image-2`（当前 Codex 默认）、`gpt-image-2.5`、`gpt-image-2.5-sunburst` 或 `gpt-image-2.5-flare`，并提供独立的 **增强 read_image** 与 **允许其他模型使用生图** 开关，两个开关默认开启。关闭第一项会撤销插件的 agent-scope 覆盖，恢复 Harness 原本只接受本地路径的 `read_image` Schema。关闭第二项后，Codex 视觉模型仍可使用 `imagegen`，其他模型提供方的调用会在执行入口被拒绝。
+设置页的生图选项会随 **刷新模型列表** 同步读取 [OpenAI 官方公开模型目录](https://developers.openai.com/api/docs/models.md)，自动加入新发布的 `gpt-image-*` 型号（包括 GPT Image 2.6 Sunburst 与 Flare）。对话模型仍读取 Codex 账号目录；公开生图目录不代表当前订阅账号拥有对应调用权限。同步会缓存规范化的型号和名称，失败时保留上次成功目录与内置后备选项，不改写已选型号；插件默认仍为 `gpt-image-2`。
+
+设置页另有独立的 **增强 read_image** 与 **允许其他模型使用生图** 开关，两个开关默认开启。关闭第一项会撤销插件的 agent-scope 覆盖，恢复 Harness 原本只接受本地路径的 `read_image` Schema。关闭第二项后，Codex 视觉模型仍可使用 `imagegen`，其他模型提供方的调用会在执行入口被拒绝。
 
 `read_image` 在返回实际图片块之前，会先验证图片并把字节持久化为 dsh 附件。本地路径原样委托给 Harness，继续沿用当前文件系统和沙箱行为；URL 扩展会限制重定向次数与下载字节数，拒绝内嵌凭据和本地／私网／特殊网络目标，并在每一跳把连接固定到已经验证的公网地址。
 
@@ -204,7 +208,7 @@ dsh-codex 0.3.0 不再写入已停用的 `web/openai-codex-search-llm-request` �
 
 设置页提供两个默认关闭、仅作用于 `openai-codex` 的开关：
 
-- **WebSocket 上下文复用**：保持 `store: false`，并选择 pi-ai 的 Codex WebSocket continuation 传输。同一会话继续复用连接，且下一轮与已有上下文严格衔接时，请求会通过 `previous_response_id` 只发送新增输入；历史改写、压缩、Fork、连接中断或进程重启后会自动发送完整上下文。关闭开关时，普通轮次使用 SSE，每次都发送 Harness 完整上下文。
+- **WebSocket 上下文复用**：保持 `store: false`，并选择 Codex WebSocket continuation 传输；仅 Codex 代理生效时，由 provider 专用适配器接入该代理。同一会话继续复用连接，且下一轮与已有上下文严格衔接时，请求会通过 `previous_response_id` 只发送新增输入；历史改写、压缩、Fork、连接中断或进程重启后会自动发送完整上下文。关闭开关时，普通轮次使用 SSE，每次都发送 Harness 完整上下文。
 - **原生 Responses 压缩**：按 Codex 当前的 V2 流程，把现有历史和一个 `compaction_trigger` item 发给 `codex/responses`。近期客户端消息与返回的加密 compaction item 会一起保存在 Harness 检查点中，并在后续 Codex 请求发送前还原。发布该检查点前，插件会用 Host token meter 对持久化标记做本地保守估算，并附加 256 token 的 frame 余量，只有估算严格小于被替换的源文本时才使用原生检查点；这是保守的收缩判断，不是对加密项的真实 token 计量。缺少 token meter、没有可用的源文本预算或结果过大时，同一次调用回退普通 Harness 摘要，因此失败路径可能先产生一次 native 请求再产生普通摘要。核心 `dsh-compaction-basic` 的收缩 gate 仍然保留，完整 retained 数据不会被截断或外置；256 余量对应已验证的当前 Harness 检查点 frame，不承诺适配任意 runtime。关闭开关不会破坏已经生成的检查点。V2 压缩不可用或请求失败时，同一次调用会自动回退到原来的 Harness 模型摘要。
 
 两个开关互相独立。所有普通 Codex 请求都保持 `store: false`；默认配置使用 SSE 和 `dsh-compaction-basic` 的文本摘要路径。

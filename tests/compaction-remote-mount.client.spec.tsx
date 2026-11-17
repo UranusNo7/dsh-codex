@@ -2,8 +2,10 @@
 
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { dirname, resolve } from 'node:path'
 import * as Cordis from '@deepseek-ai/cordis'
 import * as Slots from '@deepseek-ai/dsh-client-ui-slots'
+import * as Zod from 'zod'
 import * as React from 'react'
 import * as ReactDOM from 'react-dom'
 import * as ReactDOMClient from 'react-dom/client'
@@ -27,14 +29,23 @@ const OLD_INJECT = ['slots', 'locale', 'sessions', 'remote', 'remote.session']
 const modules: Record<string, unknown> = {
   '@deepseek-ai/cordis': Cordis,
   '@deepseek-ai/dsh-client-ui-slots': Slots,
+  zod: Zod,
   react: React,
   'react-dom': ReactDOM,
   'react-dom/client': ReactDOMClient,
   'react/jsx-runtime': JSXRuntime,
 }
 
-/** Actual published rc1 browser artifacts, not copied Gateway/Registry logic. */
-function clientModule<T>(file: string): T {
+/** Load the published browser export, not rc.3's distinct Node ESM entry. */
+function clientModule<T>(name: string, resolver: typeof require = require): T {
+  const manifestFile = resolver.resolve(`${name}/package.json`)
+  const manifest = JSON.parse(readFileSync(manifestFile, 'utf8')) as {
+    exports: Record<string, string | { browser?: string; default?: string }>
+  }
+  const client = manifest.exports['./client']
+  const entry = typeof client === 'string' ? client : client?.browser ?? client?.default
+  if (entry === undefined) throw new Error(`no published browser client for ${name}`)
+  const file = resolve(dirname(manifestFile), entry)
   let factory: ((require: (id: string) => unknown) => unknown) | undefined
   new Function('window', readFileSync(file, 'utf8'))({
     __ModuleLoader__: { load(descriptor: { factory: NonNullable<typeof factory> }) { factory = descriptor.factory } },
@@ -74,9 +85,10 @@ async function harness() {
     ok: true as const,
     value: snapshot(),
   }))
-  const connectionFile = createRequire(require.resolve('@deepseek-ai/dsh-api-gateway/client'))
-    .resolve('@deepseek-ai/dsh-client-connection/client')
-  const connection = clientModule<{ installConnection(ctx: Cordis.Context, options: unknown): void }>(connectionFile)
+  const gatewayRequire = createRequire(require.resolve('@deepseek-ai/dsh-api-gateway/package.json'))
+  const connection = clientModule<{ installConnection(ctx: Cordis.Context, options: unknown): void }>(
+    '@deepseek-ai/dsh-client-connection', gatewayRequire
+  )
   // The real Gateway normally waits for the boot roster before starting its
   // generation loop. Leave that gate closed: unary in-memory RPC needs no loop.
   ctx.provide('loader', { await: () => new Promise<void>(() => undefined) })
@@ -86,9 +98,9 @@ async function harness() {
       open: () => ({ async *[Symbol.asyncIterator]() {} }),
     } } })
   } })
-  await ctx.plugin(clientModule<typeof import('@deepseek-ai/dsh-typert-registry/client')>(require.resolve('@deepseek-ai/dsh-typert-registry/client')))
-  await ctx.plugin(clientModule<typeof import('@deepseek-ai/dsh-api-gateway/client')>(require.resolve('@deepseek-ai/dsh-api-gateway/client')))
-  await ctx.plugin(clientModule<typeof import('@deepseek-ai/dsh-client-ui-renderer/client')>(require.resolve('@deepseek-ai/dsh-client-ui-renderer/client')))
+  await ctx.plugin(clientModule<typeof import('@deepseek-ai/dsh-typert-registry/client')>('@deepseek-ai/dsh-typert-registry'))
+  await ctx.plugin(clientModule<typeof import('@deepseek-ai/dsh-api-gateway/client')>('@deepseek-ai/dsh-api-gateway'))
+  await ctx.plugin(clientModule<typeof import('@deepseek-ai/dsh-client-ui-renderer/client')>('@deepseek-ai/dsh-client-ui-renderer'))
   // Only unrelated UI-domain dependencies are small boundary fixtures.
   ctx.provide('locale', {
     register: () => () => undefined,

@@ -9,6 +9,10 @@ import { createOpenAICodexAdapter, createOpenAICodexModelProvider, openAICodexMo
 import { ImageToolPolicy } from "../src/tool-policy.ts";
 import type { OpenAICodexCredentialStore } from "../src/store.ts";
 
+/** Minimal store for adapter tests that never resolve a signed-in credential. */
+const emptyCredentialStore = (): OpenAICodexCredentialStore =>
+  ({ read: async () => undefined } as unknown as OpenAICodexCredentialStore);
+
 const bundled = openaiCodexProvider().getModels();
 const availableBundled = mergeOpenAICodexModels(bundled, undefined);
 const astra = {
@@ -123,6 +127,7 @@ describe("Codex model discovery", () => {
         "gpt-6-astra",
         "gpt-6-sol",
         "gpt-6-luna",
+        "gpt-6.1-sol",
         "gpt-6.1-terra",
         "gpt-5.6-sol",
         "gpt-5.6-terra",
@@ -174,7 +179,7 @@ describe("Codex model discovery", () => {
       () => openAICodexModelCatalog(provider)
     );
     const adapter = createOpenAICodexAdapter(
-      {} as OpenAICodexCredentialStore, () => undefined,
+      emptyCredentialStore(), () => undefined,
       () => ({ useWebSocketContextReuse: false, useNativeCompaction: false }),
       undefined, () => policy.modelCatalogSnapshot().models,
       undefined, undefined, undefined, provider
@@ -270,6 +275,7 @@ describe("official catalog authority", () => {
       "gpt-6-astra",
       "gpt-6-sol",
       "gpt-6-luna",
+      "gpt-6.1-sol",
       "gpt-6.1-terra",
       "gpt-5.6-sol",
       "gpt-5.6-terra",

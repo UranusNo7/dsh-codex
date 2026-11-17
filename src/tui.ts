@@ -301,7 +301,10 @@ function registerTuiSettingsSection(ctx: Context): void {
     return;
   }
   const dispose = tui.tuiSettingsSections.register(
-    openAICodexTuiSettingsSection(service.settingsNamespace)
+    openAICodexTuiSettingsSection(
+      service.settingsNamespace,
+      () => service.policy.imageModelCatalogSnapshot()
+    )
   );
   ctx.effect(() => dispose, "OpenAI Codex TUI settings section");
 }

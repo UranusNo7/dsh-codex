@@ -117,7 +117,7 @@ const BUILTIN_TYPES = new Set([
 const DEFAULT_TARGETS = ['https://github.com', 'https://www.gstatic.com/generate_204'];
 
 const DEFAULT_CONFIG = {
-  enabled: false,
+  enabled: true,
   /**
    * Who this proxy covers. "codex" (default) hands the mixed-port URL to the
    * Codex transport only and never touches process-global state. "global"
@@ -188,6 +188,50 @@ const logLines = [];
 function log(message) {
   logLines.push(`${new Date().toISOString().slice(11, 19)}  ${message}`);
   if (logLines.length > 400) logLines.splice(0, logLines.length - 400);
+}
+
+/** How many bytes of a kernel's combined stdout/stderr tail are kept. */
+const KERNEL_OUTPUT_LIMIT_BYTES = 256 * 1024;
+
+/**
+ * A byte-capped tail of a child process's combined output.
+ *
+ * The kernel can keep talking for the whole session, while both the `/status`
+ * diagnostics and the log written when it exits only ever use the END of that
+ * output. Retaining just the last KERNEL_OUTPUT_LIMIT_BYTES therefore loses
+ * nothing that is read, and stops a long-lived kernel from growing the host's
+ * memory without bound.
+ *
+ * stdout and stderr are pushed into the SAME instance, so the cap applies to
+ * their combined output rather than doubling per stream. Only the newest bytes
+ * are copied out, and `text()` caches its decode until the next push.
+ */
+function createOutputTail(limitBytes = KERNEL_OUTPUT_LIMIT_BYTES) {
+  const chunks = [];
+  let bytes = 0;
+  let cached;
+  return {
+    push(chunk) {
+      const piece = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8');
+      if (piece.length === 0) return;
+      chunks.push(piece);
+      bytes += piece.length;
+      while (chunks.length > 1 && bytes - chunks[0].length >= limitBytes) {
+        bytes -= chunks.shift().length;
+      }
+      // The head chunk may straddle the limit: keep only its newest bytes.
+      // Copy instead of subarray so an oversized chunk is actually released.
+      if (bytes > limitBytes) {
+        chunks[0] = Buffer.from(chunks[0].subarray(bytes - limitBytes));
+        bytes = limitBytes;
+      }
+      cached = undefined;
+    },
+    text() {
+      cached ??= Buffer.concat(chunks).toString('utf8');
+      return cached;
+    },
+  };
 }
 
 function readConfigFile() {
@@ -460,7 +504,7 @@ function ensureGeodata() {
 }
 
 let child;
-let kernelOutput = [];
+let kernelOutput = createOutputTail();
 
 async function startKernel() {
   if (state.kernel.status === 'running') return state.kernel;
@@ -491,27 +535,27 @@ async function startKernel() {
     writeFileSync(runtimeConfigPath(), buildRuntimeConfig(readFileSync(subscriptionPath(), 'utf8')), 'utf8');
   }
 
-  kernelOutput = [];
+  const output = createOutputTail();
+  kernelOutput = output;
   const spawned = spawn(kernel, ['-d', stateDir(), '-f', runtimeConfigPath()], {
     cwd: stateDir(),
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
   const generation = kernelGeneration;
-  const output = [];
   child = spawned;
-  spawned.stdout.on('data', (chunk) => { output.push(String(chunk)); kernelOutput.push(String(chunk)); });
-  spawned.stderr.on('data', (chunk) => { output.push(String(chunk)); kernelOutput.push(String(chunk)); });
+  spawned.stdout.on('data', (chunk) => { output.push(chunk); });
+  spawned.stderr.on('data', (chunk) => { output.push(chunk); });
   spawned.on('exit', (code) => {
     // Only ever speak for the process this handler was created for. Stopping a
     // kernel can take seconds (signal, then a forced kill), and in that window a
     // replacement may already be running — without this guard the old process's
     // exit would tear down the new one's state and "kill" the switch.
     if (child !== spawned) return;
-    const tail = output.join('').trim().slice(-400);
+    const tail = output.text().trim().slice(-400);
     if (state.kernel.status !== 'stopped') log(`内核退出，code=${code}${tail === '' ? '' : ` — ${tail.slice(-200)}`}`);
     state.kernel = { status: 'stopped', error: `内核退出 (${code})${tail === '' ? '' : `: ${tail.slice(-300)}`}` };
-    try { writeFileSync(kernelLogPath(), output.join(''), 'utf8'); } catch { /* ignore */ }
+    try { writeFileSync(kernelLogPath(), output.text(), 'utf8'); } catch { /* ignore */ }
     child = undefined;
     kernelGeneration = Math.max(kernelGeneration, generation + 1);
   });
@@ -530,8 +574,8 @@ async function startKernel() {
     } catch { /* keep waiting */ }
   }
 
-  const tail = kernelOutput.join('').slice(-800);
-  try { writeFileSync(kernelLogPath(), kernelOutput.join(''), 'utf8'); } catch { /* ignore */ }
+  const tail = output.text().slice(-800);
+  try { writeFileSync(kernelLogPath(), output.text(), 'utf8'); } catch { /* ignore */ }
   state.kernel = { status: 'failed', error: tail.trim() === '' ? '内核未在 20 秒内就绪' : tail.trim() };
   log(`内核启动失败：${state.kernel.error.slice(0, 300)}`);
   await stopKernel();
@@ -740,9 +784,9 @@ async function downloadViaCore(url, timeoutMs = 45000) {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   });
-  const helperLog = [];
-  helper.stdout.on('data', (chunk) => helperLog.push(String(chunk)));
-  helper.stderr.on('data', (chunk) => helperLog.push(String(chunk)));
+  const helperLog = createOutputTail();
+  helper.stdout.on('data', (chunk) => helperLog.push(chunk));
+  helper.stderr.on('data', (chunk) => helperLog.push(chunk));
 
   /**
    * Kill the helper and WAIT for it to be gone before touching its directory.
@@ -784,7 +828,7 @@ async function downloadViaCore(url, timeoutMs = 45000) {
       } catch { /* keep waiting */ }
     }
     if (!ready) {
-      throw new Error(`辅助内核未就绪：${helperLog.join('').trim().slice(-200) || '无输出'}`);
+      throw new Error(`辅助内核未就绪：${helperLog.text().trim().slice(-200) || '无输出'}`);
     }
 
     const response = await proxiedGet(url, mixedPort, timeoutMs);
@@ -1453,7 +1497,7 @@ function snapshot() {
   return {
     enabled: state.config.enabled,
     scope: getNetworkProxyScope(),
-    kernel: { ...state.kernel, path: findKernel(), log: kernelOutput.join('').slice(-1500) },
+    kernel: { ...state.kernel, path: findKernel(), log: kernelOutput.text().slice(-1500) },
     routing: state.routing,
     group: state.group,
     current: state.current,
@@ -1894,24 +1938,20 @@ export function apply(ctx, config = {}) {
     void stopKernel().catch(() => {});
   });
 
-  /*
-   * NOTHING starts here, ever. This is the whole point of the file's shape.
-   *
-   * Loading the plugin must be free: no kernel process, no subscription
-   * download, no dispatcher. Someone who does not need a proxy on a given day
-   * should never pay for one, and doing this work at boot put seconds onto every
-   * app start. The kernel comes up when the user turns the proxy on — and a
-   * previous session's "on" is NOT a reason to start now, because the user's
-   * complaint was precisely that opening the app began work they had not asked
-   * for. The saved flag only decides what the switch shows.
-   */
+  // Restore the saved switch in the background without blocking plugin load.
+  // Fresh settings default to Codex-only routing; an explicit off stays off.
   if (state.config.enabled) {
-    log('上次会话里代理是开启的；本次等待你点「启用代理」后再启动内核');
-    state.config.enabled = false;
-    state.config.autoEnabled = true;
-    persist();
+    state.lastError = undefined;
+    state.busy = 'enable';
+    void serialize(() => enableProxy(isDisposed))
+      .catch((error) => {
+        if (isSuperseded(error) || disposed) return;
+        state.lastError = String(error?.message ?? error);
+        log(`自动启用失败：${state.lastError}`);
+      })
+      .finally(() => { state.busy = undefined; });
   } else {
-    log('就绪（未启动内核）。点「启用代理」即可开始。');
+    log('就绪（代理已关闭）。点「启用代理」即可开始。');
   }
 }
 
@@ -1968,4 +2008,6 @@ export {
   findKernel as _findKernel,
   resolvePackageRoot as _resolvePackageRoot,
   normalizeScope as _normalizeScope,
+  createOutputTail as _createOutputTail,
+  KERNEL_OUTPUT_LIMIT_BYTES as _KERNEL_OUTPUT_LIMIT_BYTES,
 };

@@ -18,6 +18,7 @@ import SessionProjectionRuntime from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import {
   OPENAI_CODEX_AUTH_CANCEL_PATH,
@@ -184,7 +185,8 @@ async function compose(options: ComposeOptions = {}): Promise<Composed> {
   const ctx = new Context()
   contexts.push(ctx)
   await ctx.plugin(SystemPrompt)
-  await ctx.plugin(ToolRuntime, { mode: 'native' })
+  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(NativeToolExecutor)
   await ctx.plugin(SessionProjectionRuntime)
   await ctx.plugin(SandboxPolicyService, {
     mode: options.sandboxMode ?? 'workspace-write',
@@ -223,13 +225,17 @@ async function call(
   name: string,
   args: Record<string, unknown>
 ): Promise<{ isError: boolean; keys: string[] | undefined }> {
-  const result = await composed.ctx.tools.execute({
-    callId: ToolCallId(`standalone-${++sequence}`),
-    name,
-    arguments: args,
+  const batch = await composed.ctx.tools.execute({
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId(`standalone-${++sequence}`),
+      name,
+      arguments: JSON.stringify(args),
+    }],
     signal,
     agent: composed.agent.agent as never,
   })
+  const result = batch.results[0]!.result
   const value = result.isError ? undefined : (result.value as { keys?: string })
   return {
     isError: result.isError,

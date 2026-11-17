@@ -97,7 +97,7 @@ import { DEFAULT_PROXY_PREFERENCES } from "./proxy.ts";
 import type { OpenAICodexProxyMode } from "./proxy.ts";
 import {
   DEFAULT_OPENAI_CODEX_IMAGE_MODEL,
-  OPENAI_CODEX_IMAGE_MODELS,
+  IMAGE_MODEL_ID_PATTERN,
 } from "./image-model.ts";
 import type { OpenAICodexImageModel } from "./image-model.ts";
 import { apply as applyNetworkProxy } from "./net-proxy/index.js";
@@ -145,8 +145,9 @@ export {
   DEFAULT_OPENAI_CODEX_IMAGE_MODEL,
   OPENAI_CODEX_IMAGE_MODELS,
   isOpenAICodexImageModel,
+  isOpenAICodexImageModelId,
 } from "./image-model.ts";
-export type { OpenAICodexImageModel } from "./image-model.ts";
+export type { OpenAICodexImageModel, OpenAICodexImageModelEntry } from "./image-model.ts";
 
 export {
   assertNoOpenAICodexProviderConflict,
@@ -297,11 +298,11 @@ export const Config = z.object({
     .default(DEFAULT_OPENAI_CODEX_SEARCH_MAX_OUTPUT_TOKENS),
   modifyReadImage: z.boolean().default(true).volatile(),
   shareImagegenWithOtherModels: z.boolean().default(true).volatile(),
-  imageGenerationModel: z
-    .union(OPENAI_CODEX_IMAGE_MODELS.map((model) => model.id) as [
-      OpenAICodexImageModel,
-      ...OpenAICodexImageModel[],
-    ])
+  // A refreshed catalog can advertise models newer than this build's fallback.
+  // Validate the persisted identifier without requiring a network call at boot.
+  imageGenerationModel: z.string()
+    .pattern(IMAGE_MODEL_ID_PATTERN)
+    .max(128)
     .default(DEFAULT_OPENAI_CODEX_IMAGE_MODEL)
     .volatile(),
   useWebSocketContextReuse: z.boolean().default(false).volatile(),
@@ -591,7 +592,9 @@ export function apply(ctx: Context, config: Config): void {
       () => imageTools.fastModeSnapshot().fastModeDefault,
       modelProvider,
       estimateCompactionText,
-      (decision) => diagnostics.recordDecision(decision)
+      (decision) => diagnostics.recordDecision(decision),
+      () => service.websocketTransportBypassesProxy(),
+      service.websocket
     )
   );
   ctx.effect(

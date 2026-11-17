@@ -177,7 +177,7 @@ describe("backend-authorized model fallback", () => {
 
     await events.waterfall(
       "agent/pre-step",
-      { messages: [], turn: 1, step: 1, signal },
+      { messages: [], turn: 1, step: 1, signal, modelSelection: source },
       () => Promise.resolve({ kind: "enter", messages: [] })
     );
     await expect(

@@ -103,7 +103,7 @@ export function apply(ctx: ClientContext): void {
     if (cached !== undefined) return cached
     const session = ctx.sessions.binding(sessionId)?.session
     if (session === undefined) return Promise.reject(new Error(`unknown session ${sessionId}`))
-    const pending = session.readAttachment(attachment.attachmentId).then(result => {
+    const pending = session.readAttachment(attachment).then(result => {
       if (!result.ok) throw new Error(`${result.error.code}: ${result.error.message}`)
       const bytes = Uint8Array.from(result.value.data)
       const url = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: result.value.attachment.mediaType }))

@@ -17,12 +17,15 @@ import {
 } from "./model-catalog-remote.ts";
 import type { OpenAICodexOfficialSnapshot } from "./model-catalog-remote.ts";
 import { OpenAICodexProxyTransport } from "./proxy.ts";
+import { CodexWebSocketTransport } from "./codex-websocket.ts";
 import type { ProxyPreferences } from "./proxy.ts";
+import { normalizeProxyUrl } from "./proxy.ts";
 import {
   networkProxyCodexUrl,
   networkProxyOwnsGlobal,
 } from "./net-proxy/index.js";
 import { ImageToolPolicy } from "./tool-policy.ts";
+import type { OpenAICodexImageModelEntry } from "./image-model.ts";
 import type {
   ContextWindowPreferences,
   FastModePreferences,
@@ -41,6 +44,23 @@ declare module "@deepseek-ai/cordis" {
     /** Provider-owned account and preference service for optional front doors. */
     openAICodex: OpenAICodexService;
   }
+}
+
+/**
+ * Whether scoped mode has a proxy to use: an explicit URL or one of the
+ * standard proxy environment variables the scoped dispatcher reads.
+ */
+function scopedProxyConfigured(proxyUrl: string): boolean {
+  if (normalizeProxyUrl(proxyUrl).length > 0) return true;
+  return [
+    "DSH_CODEX_PROXY",
+    "https_proxy",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "HTTP_PROXY",
+    "all_proxy",
+    "ALL_PROXY",
+  ].some((name) => (process.env[name]?.trim() ?? "").length > 0);
 }
 
 /** Initial settings contributed by the bundle configuration. */
@@ -73,6 +93,7 @@ export class OpenAICodexService {
   readonly credentials: OpenAICodexCredentialStore;
   readonly policy: ImageToolPolicy;
   readonly proxy: OpenAICodexProxyTransport;
+  readonly websocket: CodexWebSocketTransport;
   private readonly catalog: OpenAICodexOfficialCatalog;
   private readonly catalogFallbackSource: () => "codex-cache" | "bundled";
   private readonly stopProxyWatch: () => void;
@@ -96,7 +117,14 @@ export class OpenAICodexService {
       settingsNamespace: _settingsNamespace,
       ...preferences
     } = options;
-    this.policy = new ImageToolPolicy(preferences, modelCatalog);
+    this.policy = new ImageToolPolicy(
+      preferences,
+      modelCatalog,
+      // The public image directory arrives with the same catalog refresh; this
+      // callback reads the live snapshot instead of copying its entries.
+      (): readonly OpenAICodexImageModelEntry[] =>
+        this.catalog?.snapshot()?.imageModels ?? []
+    );
     this.catalogFallbackSource = modelCatalogSource ?? (() => "bundled");
     this.catalog = officialCatalog ?? new OpenAICodexOfficialCatalog({
       cacheFile: openAICodexCatalogCachePath(this.credentials.filename),
@@ -113,6 +141,7 @@ export class OpenAICodexService {
         netProxyOwnsGlobal: networkProxyOwnsGlobal,
       }
     );
+    this.websocket = new CodexWebSocketTransport(() => this.proxy.websocketRoute());
     void this.proxy.apply().catch((error: unknown) => {
       process.stderr.write(
         `[dsh-codex] failed to apply proxy settings: ${error instanceof Error ? error.message : String(error)}\n`
@@ -255,7 +284,11 @@ export class OpenAICodexService {
       ...(provenance === undefined ? {} : { updatedAt: provenance.updatedAt }),
       ...(error === undefined ? {} : { error }),
     };
-    return { ...this.policy.modelCatalogSnapshot(), discovery };
+    return {
+      ...this.policy.modelCatalogSnapshot(),
+      availableImageModels: this.policy.imageModelCatalogSnapshot(),
+      discovery,
+    };
   }
 
   /** Official catalog snapshot that constrains the advertised candidates. */
@@ -290,6 +323,23 @@ export class OpenAICodexService {
     return this.policy.proxySnapshot();
   }
 
+  /**
+   * Whether the unadapted pi-ai WebSocket would bypass the Codex HTTP proxy.
+   * Callers without the provider-local WebSocket adapter use this guard to
+   * stay on SSE. The adapter uses its captured proxy route instead; neither
+   * path rewrites the user's context-reuse preference.
+   */
+  websocketTransportBypassesProxy(): boolean {
+    const preferences = this.policy.proxySnapshot();
+    if (preferences.proxyMode === "scoped") {
+      return scopedProxyConfigured(preferences.proxyUrl);
+    }
+    // An explicit global policy belongs to the host's own process-wide proxy.
+    if (preferences.proxyMode !== "off") return false;
+    const managed = networkProxyCodexUrl();
+    return managed !== undefined && managed.length > 0;
+  }
+
   async updateProxyPreferences(
     patch: Partial<ProxyPreferences>
   ): Promise<ProxyPreferences> {
@@ -301,6 +351,7 @@ export class OpenAICodexService {
   async dispose(): Promise<void> {
     this.stopProxyWatch();
     this.catalog.dispose();
+    this.websocket.dispose();
     await this.proxy.dispose();
   }
 

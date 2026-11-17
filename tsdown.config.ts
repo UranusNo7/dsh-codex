@@ -47,7 +47,6 @@ export default [
         '@deepseek-ai/dsh-fs',
         '@deepseek-ai/dsh-host-webserver',
         '@deepseek-ai/dsh-http-proxy',
-        '@deepseek-ai/dsh-invariants',
         '@deepseek-ai/dsh-llm',
         '@deepseek-ai/dsh-llm-pi-ai',
         '@deepseek-ai/dsh-session',

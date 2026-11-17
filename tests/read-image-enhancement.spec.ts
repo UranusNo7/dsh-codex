@@ -8,6 +8,7 @@ import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
 import LlmRuntime, { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import * as NativeToolExecutor from '@deepseek-ai/dsh-tool-executor-native'
 import WebRuntime from '@deepseek-ai/dsh-web'
 import * as OpenAICodex from '../src/index.ts'
 import { enhancedReadImageTool, installReadImageEnhancement } from '../src/read-image-enhancement.ts'
@@ -96,7 +97,8 @@ async function setup(publicHttpRuntime?: PublicHttpRuntime): Promise<Context> {
   const context = new Context()
   ctx = context
   await context.plugin(SystemPrompt)
-  await context.plugin(ToolRuntime, { mode: 'native' })
+  await context.plugin(ToolRuntime)
+  await context.plugin(NativeToolExecutor)
   await context.plugin(LocalFileSystem, { cwd: workspace })
   await context.plugin(LocalAttachmentStore, { dshHome })
   await context.plugin(LlmRuntime)
@@ -122,13 +124,17 @@ async function readImage(
   arguments_: { file_path?: string; url?: string },
   model = 'gpt-5.6-sol',
 ) {
-  return context.tools.execute({
+  const batch = await context.tools.execute({
+    calls: [{
+      type: 'tool-call',
+      id: ToolCallId(`read-image-${++callCounter}`),
+      name: OpenAICodex.READ_IMAGE_TOOL_NAME,
+      arguments: JSON.stringify(arguments_),
+    }],
     signal,
-    callId: ToolCallId(`read-image-${++callCounter}`),
-    name: OpenAICodex.READ_IMAGE_TOOL_NAME,
-    arguments: arguments_,
     agent: agentOn(model) as never,
   })
+  return batch.results[0]!.result
 }
 
 describe('read_image enhancement', () => {

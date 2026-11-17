@@ -4,8 +4,12 @@ import {
   EnvHttpProxyAgent,
   fetch as undiciFetch,
   ProxyAgent,
+  WebSocket as UndiciWebSocket,
 } from "undici";
-import type { Dispatcher } from "undici";
+import type {
+  Dispatcher,
+  WebSocket as UndiciWebSocketType,
+} from "undici";
 import { installProxyFromEnvironment } from "@deepseek-ai/dsh-http-proxy";
 
 export type OpenAICodexProxyMode = "off" | "scoped" | "global";
@@ -184,6 +188,28 @@ export interface ProxyTransportHooks {
   netProxyOwnsGlobal?: () => boolean;
 }
 
+/**
+ * One captured proxy line for a single Codex WebSocket request.
+ *
+ * `identity` is the dispatcher object itself: the same identity means exactly
+ * the same connection line, and a proxy URL, port, or proxy-environment change
+ * yields a different identity. `fetch` is bound to that same dispatcher so an
+ * SDK SSE fallback cannot follow a preference change onto another line, and
+ * `createWebSocket` tunnels the WebSocket through it without touching the
+ * process-wide dispatcher or the environment.
+ */
+export interface CodexWebSocketRoute {
+  /** Stable identity of the captured dispatcher/route. */
+  readonly identity: object;
+  /** Fetch through the captured dispatcher (same line as the WebSocket). */
+  readonly fetch: typeof globalThis.fetch;
+  /** Open a WebSocket that connects through the captured dispatcher. */
+  createWebSocket(
+    url: string,
+    headers: Record<string, string>
+  ): UndiciWebSocketType;
+}
+
 async function installHarnessGlobalProxy(
   proxyUrl: string
 ): Promise<ProxyDisposer> {
@@ -207,6 +233,10 @@ async function installHarnessGlobalProxy(
  */
 export class OpenAICodexProxyTransport {
   private readonly dispatchers = new Map<string, Dispatcher>();
+  private readonly websocketRoutes = new WeakMap<
+    Dispatcher,
+    CodexWebSocketRoute
+  >();
   private globalDispose: (() => Promise<void>) | undefined;
   private appliedGlobalKey: string | undefined;
   private managedUrl: string | undefined;
@@ -280,6 +310,30 @@ export class OpenAICodexProxyTransport {
     return await globalThis.fetch(input, init);
   };
 
+  /**
+   * Capture the proxy line for one Codex WebSocket request.
+   *
+   * "scoped" uses exactly the dispatcher `fetch` would use for the same
+   * preferences: an explicit ProxyAgent, or EnvHttpProxyAgent with the
+   * environment's NO_PROXY rules. The default "off" mode uses the bundled
+   * network proxy's managed dispatcher while it is running. "global" and
+   * direct/off return undefined so the upstream WebSocket stays untouched.
+   */
+  websocketRoute(): CodexWebSocketRoute | undefined {
+    if (this.disposed) return undefined;
+    const preferences = this.preferences();
+    if (preferences.proxyMode === "scoped") {
+      return this.routeFor(this.dispatcher(preferences.proxyUrl));
+    }
+    if (preferences.proxyMode === "off") {
+      const managed = this.hooks.managedProxyUrl?.();
+      if (managed !== undefined && managed !== "") {
+        return this.routeFor(this.managedDispatcher(managed));
+      }
+    }
+    return undefined;
+  }
+
   /** Restore host networking and close all provider-owned pools. */
   async dispose(): Promise<void> {
     await this.transition.catch(() => undefined);
@@ -324,5 +378,38 @@ export class OpenAICodexProxyTransport {
     this.globalDispose = undefined;
     this.appliedGlobalKey = undefined;
     await dispose?.();
+  }
+
+  /**
+   * Stable route object for one dispatcher.
+   *
+   * Both functions refuse after `dispose()` so a route captured by a request
+   * cannot open a connection through a dispatcher the plugin has already
+   * closed.
+   */
+  private routeFor(dispatcher: Dispatcher): CodexWebSocketRoute {
+    const existing = this.websocketRoutes.get(dispatcher);
+    if (existing !== undefined) return existing;
+    const fetchThroughRoute: typeof globalThis.fetch = async (input, init) => {
+      if (this.disposed) throw new Error("Proxy transport is disposed");
+      const options = {
+        ...(init ?? {}),
+        dispatcher,
+      } as Parameters<typeof undiciFetch>[1];
+      return (await undiciFetch(
+        input as Parameters<typeof undiciFetch>[0],
+        options
+      )) as unknown as Response;
+    };
+    const route: CodexWebSocketRoute = {
+      identity: dispatcher,
+      fetch: fetchThroughRoute,
+      createWebSocket: (url, headers) => {
+        if (this.disposed) throw new Error("Proxy transport is disposed");
+        return new UndiciWebSocket(url, { dispatcher, headers });
+      },
+    };
+    this.websocketRoutes.set(dispatcher, route);
+    return route;
   }
 }
